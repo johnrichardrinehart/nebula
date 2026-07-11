@@ -87,6 +87,42 @@
               ];
             };
 
+            securekey-test = pkgs.buildGoModule {
+              pname = "nebula-securekey-test";
+              version = "unstable";
+              src = packageSource;
+              vendorHash = goVendorHash;
+              buildPhase = ''
+                runHook preBuild
+                go test -c -o securekey.test ./securekey
+                runHook postBuild
+              '';
+              installPhase = ''
+                runHook preInstall
+                install -Dm755 securekey.test $out/bin/securekey.test
+                runHook postInstall
+              '';
+              doCheck = false;
+            };
+
+            handshake-test = pkgs.buildGoModule {
+              pname = "nebula-handshake-test";
+              version = "unstable";
+              src = packageSource;
+              vendorHash = goVendorHash;
+              buildPhase = ''
+                runHook preBuild
+                go test -c -o handshake.test ./handshake
+                runHook postBuild
+              '';
+              installPhase = ''
+                runHook preInstall
+                install -Dm755 handshake.test $out/bin/handshake.test
+                runHook postInstall
+              '';
+              doCheck = false;
+            };
+
             tpmclient-test = pkgs.buildGoModule {
               pname = "nebula-tpmclient-test";
               version = "unstable";

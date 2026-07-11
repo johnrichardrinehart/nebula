@@ -2,6 +2,7 @@
   pkgs,
   nebula,
   nebulaUpstream,
+  securekeyTest,
 }:
 let
   unseal = pkgs.writeShellScript "nebula-unseal-x25519" ''
@@ -57,7 +58,10 @@ pkgs.testers.runNixOSTest {
 
   nodes.stock = { ... }: {
     networking.firewall.allowedUDPPorts = [ 4242 ];
-    environment.systemPackages = [ nebulaUpstream ];
+    environment.systemPackages = [
+      nebulaUpstream
+      securekeyTest
+    ];
     systemd.services.nebula-stock = {
       serviceConfig = {
         ExecStart = "${nebulaUpstream}/bin/nebula -config /var/lib/nebula-stock/config.yml";
@@ -131,6 +135,8 @@ pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds("ping -c1 -W1 10.42.42.2", timeout=60)
     stock.wait_until_succeeds("ping -c1 -W1 10.42.42.1", timeout=60)
     stock.succeed("systemctl is-active nebula-stock.service")
+    # This node has no TPM; exercise the mlocked, non-dumpable encrypted-memory fallback.
+    stock.succeed("securekey.test -test.v")
 
     machine.succeed("systemctl stop nebula-sealed-test.service")
     machine.succeed("digest=$(printf changed | sha256sum | cut -d' ' -f1); tpm2_pcrextend 7:sha256=$digest")

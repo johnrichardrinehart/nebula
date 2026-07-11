@@ -1,4 +1,8 @@
-{ pkgs, tpmclientTest }:
+{
+  pkgs,
+  tpmclientTest,
+  handshakeTest,
+}:
 pkgs.testers.runNixOSTest {
   name = "nebula-tpm-ecdh";
 
@@ -7,6 +11,7 @@ pkgs.testers.runNixOSTest {
     environment.systemPackages = [
       pkgs.tpm2-tools
       tpmclientTest
+      handshakeTest
     ];
   };
 
@@ -25,11 +30,12 @@ pkgs.testers.runNixOSTest {
     )
     machine.succeed("tpm2_evictcontrol -C o -c /tmp/p384.ctx 0x81010011")
 
-    machine.succeed(
+    tpm_env = (
       "NEBULA_TEST_TPM_URI_P256='tpm2:device=/dev/tpmrm0;handle=0x81010010;curve=P256' "
       "NEBULA_TEST_TPM_URI_P384='tpm2:device=/dev/tpmrm0;handle=0x81010011;curve=P384' "
-      "tpmclient.test -test.v -test.run TestPersistentTPMECDH"
     )
+    machine.succeed(tpm_env + "tpmclient.test -test.v -test.run TestPersistentTPMECDH")
+    machine.succeed(tpm_env + "handshake.test -test.v -test.run TestTPMBackedUpgradeHandshake")
 
     p256 = machine.succeed("tpm2_readpublic -c 0x81010010")
     p384 = machine.succeed("tpm2_readpublic -c 0x81010011")
