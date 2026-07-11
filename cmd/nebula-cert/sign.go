@@ -426,6 +426,8 @@ func newKeypair(curve cert.Curve) ([]byte, []byte) {
 		return x25519Keypair()
 	case cert.Curve_P256:
 		return p256Keypair()
+	case cert.Curve_P384:
+		return p384Keypair()
 	default:
 		return nil, nil
 	}
@@ -446,12 +448,19 @@ func x25519Keypair() ([]byte, []byte) {
 }
 
 func p256Keypair() ([]byte, []byte) {
-	privkey, err := ecdh.P256().GenerateKey(rand.Reader)
+	return nistKeypair(ecdh.P256())
+}
+
+func p384Keypair() ([]byte, []byte) {
+	return nistKeypair(ecdh.P384())
+}
+
+func nistKeypair(curve ecdh.Curve) ([]byte, []byte) {
+	privkey, err := curve.GenerateKey(rand.Reader)
 	if err != nil {
 		panic(err)
 	}
-	pubkey := privkey.PublicKey()
-	return pubkey.Bytes(), privkey.Bytes()
+	return privkey.PublicKey().Bytes(), privkey.Bytes()
 }
 
 func signSummary() string {

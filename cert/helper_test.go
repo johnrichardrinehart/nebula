@@ -27,14 +27,20 @@ func NewTestCaCert(version Version, curve Curve, before, after time.Time, networ
 	switch curve {
 	case Curve_CURVE25519:
 		pub, priv, err = ed25519.GenerateKey(rand.Reader)
-	case Curve_P256:
-		privk, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	case Curve_P256, Curve_P384:
+		c := elliptic.P256()
+		byteLen := 32
+		if curve == Curve_P384 {
+			c = elliptic.P384()
+			byteLen = 48
+		}
+		privk, err := ecdsa.GenerateKey(c, rand.Reader)
 		if err != nil {
 			panic(err)
 		}
 
-		pub = elliptic.Marshal(elliptic.P256(), privk.PublicKey.X, privk.PublicKey.Y)
-		priv = privk.D.FillBytes(make([]byte, 32))
+		pub = elliptic.Marshal(c, privk.PublicKey.X, privk.PublicKey.Y)
+		priv = privk.D.FillBytes(make([]byte, byteLen))
 	default:
 		// There is no default to allow the underlying lib to respond with an error
 	}
@@ -93,6 +99,8 @@ func NewTestCert(v Version, curve Curve, ca Certificate, key []byte, name string
 		pub, priv = X25519Keypair()
 	case Curve_P256:
 		pub, priv = P256Keypair()
+	case Curve_P384:
+		pub, priv = P384Keypair()
 	default:
 		panic("unknown curve")
 	}
@@ -144,4 +152,12 @@ func P256Keypair() ([]byte, []byte) {
 	}
 	pubkey := privkey.PublicKey()
 	return pubkey.Bytes(), privkey.Bytes()
+}
+
+func P384Keypair() ([]byte, []byte) {
+	privkey, err := ecdh.P384().GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	return privkey.PublicKey().Bytes(), privkey.Bytes()
 }

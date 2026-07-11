@@ -21,6 +21,7 @@ import (
 	"github.com/slackhq/nebula/config"
 	"github.com/slackhq/nebula/handshake"
 	"github.com/slackhq/nebula/noiseutil"
+	"github.com/slackhq/nebula/tpmclient"
 	"github.com/slackhq/nebula/util"
 )
 
@@ -237,19 +238,31 @@ func (cs *CertState) getCertificate(v cert.Version) cert.Certificate {
 	return nil
 }
 
-func newCipherSuite(curve cert.Curve, pkcs11backed bool, cipher string) (noise.CipherSuite, error) {
+func newCipherSuite(curve cert.Curve, hardwareBacked bool, privateKey []byte, cipher string) (noise.CipherSuite, error) {
 	var dhFunc noise.DHFunc
 	switch curve {
 	case cert.Curve_CURVE25519:
 		dhFunc = noise.DH25519
 	case cert.Curve_P256:
-		if pkcs11backed {
+		switch {
+		case strings.HasPrefix(string(privateKey), "pkcs11:"):
 			dhFunc = noiseutil.DHP256PKCS11
-		} else {
+		case strings.HasPrefix(string(privateKey), "tpm2:"):
+			dhFunc = noiseutil.DHP256TPM
+		default:
 			dhFunc = noiseutil.DHP256
+		}
+	case cert.Curve_P384:
+		if strings.HasPrefix(string(privateKey), "tpm2:") {
+			dhFunc = noiseutil.DHP384TPM
+		} else {
+			dhFunc = noiseutil.DHP384
 		}
 	default:
 		return nil, fmt.Errorf("unsupported curve: %s", curve)
+	}
+	if hardwareBacked && !strings.HasPrefix(string(privateKey), "pkcs11:") && !strings.HasPrefix(string(privateKey), "tpm2:") {
+		return nil, errors.New("hardware-backed key has unsupported reference")
 	}
 
 	if cipher == "chachapoly" {
@@ -401,7 +414,11 @@ func newCertState(dv cert.Version, v1, v2 cert.Certificate, pkcs11backed bool, p
 	}
 
 	if v1 != nil {
-		if pkcs11backed {
+		if strings.HasPrefix(string(privateKey), "tpm2:") {
+			if err := verifyTPMPublicKey(privateKey, v1); err != nil {
+				return nil, err
+			}
+		} else if pkcs11backed {
 			//NOTE: We do not currently have a method to verify a public private key pair when the private key is in an hsm
 		} else {
 			if err := v1.VerifyPrivateKey(privateKeyCurve, privateKey); err != nil {
@@ -413,7 +430,7 @@ func newCertState(dv cert.Version, v1, v2 cert.Certificate, pkcs11backed bool, p
 		if err != nil {
 			return nil, fmt.Errorf("error marshalling v1 certificate for handshake: %w", err)
 		}
-		ncs, err := newCipherSuite(v1.Curve(), pkcs11backed, cipher)
+		ncs, err := newCipherSuite(v1.Curve(), pkcs11backed, privateKey, cipher)
 		if err != nil {
 			return nil, err
 		}
@@ -426,7 +443,11 @@ func newCertState(dv cert.Version, v1, v2 cert.Certificate, pkcs11backed bool, p
 	}
 
 	if v2 != nil {
-		if pkcs11backed {
+		if strings.HasPrefix(string(privateKey), "tpm2:") {
+			if err := verifyTPMPublicKey(privateKey, v2); err != nil {
+				return nil, err
+			}
+		} else if pkcs11backed {
 			//NOTE: We do not currently have a method to verify a public private key pair when the private key is in an hsm
 		} else {
 			if err := v2.VerifyPrivateKey(privateKeyCurve, privateKey); err != nil {
@@ -438,7 +459,7 @@ func newCertState(dv cert.Version, v1, v2 cert.Certificate, pkcs11backed bool, p
 		if err != nil {
 			return nil, fmt.Errorf("error marshalling v2 certificate for handshake: %w", err)
 		}
-		ncs, err := newCipherSuite(v2.Curve(), pkcs11backed, cipher)
+		ncs, err := newCipherSuite(v2.Curve(), pkcs11backed, privateKey, cipher)
 		if err != nil {
 			return nil, err
 		}
@@ -475,6 +496,21 @@ func newCertState(dv cert.Version, v1, v2 cert.Certificate, pkcs11backed bool, p
 	return &cs, nil
 }
 
+func verifyTPMPublicKey(keyReference []byte, certificate cert.Certificate) error {
+	key, err := tpmclient.ParseKeyURI(string(keyReference))
+	if err != nil {
+		return err
+	}
+	publicKey, err := key.PublicKey()
+	if err != nil {
+		return err
+	}
+	if !slices.Equal(publicKey, certificate.PublicKey()) {
+		return errors.New("TPM public key does not match public key in nebula cert")
+	}
+	return nil
+}
+
 func loadPrivateKey(privPathOrPEM string) (rawKey []byte, curve cert.Curve, isPkcs11 bool, err error) {
 	var pemPrivateKey []byte
 	if strings.Contains(privPathOrPEM, "-----BEGIN") {
@@ -487,6 +523,18 @@ func loadPrivateKey(privPathOrPEM string) (rawKey []byte, curve cert.Curve, isPk
 	} else if strings.HasPrefix(privPathOrPEM, "pkcs11:") {
 		rawKey = []byte(privPathOrPEM)
 		return rawKey, cert.Curve_P256, true, nil
+	} else if strings.HasPrefix(privPathOrPEM, "tpm2:") {
+		key, parseErr := tpmclient.ParseKeyURI(privPathOrPEM)
+		if parseErr != nil {
+			return nil, curve, false, parseErr
+		}
+		switch key.CurveName() {
+		case "P256":
+			curve = cert.Curve_P256
+		case "P384":
+			curve = cert.Curve_P384
+		}
+		return []byte(privPathOrPEM), curve, true, nil
 	} else {
 		pemPrivateKey, err = os.ReadFile(privPathOrPEM)
 		if err != nil {

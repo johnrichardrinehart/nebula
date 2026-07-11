@@ -50,7 +50,7 @@
               pname = "nebula";
               version = "unstable";
               src = packageSource;
-              vendorHash = "sha256-RT3oE58+LevfJ+pZsu39XFKGuDfBRfdpx1ujWYVVOdU=";
+              vendorHash = "sha256-qhEnYgHcvWdiQ9DsPbUoTGRst/ojzsuHhqacZcdmO8w=";
 
               subPackages = [
                 "cmd/nebula"

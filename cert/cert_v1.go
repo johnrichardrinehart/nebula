@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -123,6 +124,13 @@ func (c *certificateV1) CheckSignature(key []byte) bool {
 		}
 		hashed := sha256.Sum256(b)
 		return ecdsa.VerifyASN1(pubKey, hashed[:], c.signature)
+	case Curve_P384:
+		pubKey, err := ecdsa.ParseUncompressedPublicKey(elliptic.P384(), key)
+		if err != nil {
+			return false
+		}
+		hashed := sha512.Sum384(b)
+		return ecdsa.VerifyASN1(pubKey, hashed[:], c.signature)
 	default:
 		return false
 	}
@@ -147,10 +155,14 @@ func (c *certificateV1) VerifyPrivateKey(curve Curve, key []byte) error {
 			if !ed25519.PublicKey(c.details.publicKey).Equal(ed25519.PrivateKey(key).Public()) {
 				return fmt.Errorf("public key in cert and private key supplied don't match")
 			}
-		case Curve_P256:
-			privkey, err := ecdh.P256().NewPrivateKey(key)
+		case Curve_P256, Curve_P384:
+			curveImpl := ecdh.P256()
+			if curve == Curve_P384 {
+				curveImpl = ecdh.P384()
+			}
+			privkey, err := curveImpl.NewPrivateKey(key)
 			if err != nil {
-				return fmt.Errorf("cannot parse private key as P256: %w", err)
+				return fmt.Errorf("cannot parse private key as %s: %w", curve, err)
 			}
 			pub := privkey.PublicKey().Bytes()
 			if !bytes.Equal(pub, c.details.publicKey) {
@@ -170,8 +182,12 @@ func (c *certificateV1) VerifyPrivateKey(curve Curve, key []byte) error {
 		if err != nil {
 			return err
 		}
-	case Curve_P256:
-		privkey, err := ecdh.P256().NewPrivateKey(key)
+	case Curve_P256, Curve_P384:
+		curveImpl := ecdh.P256()
+		if curve == Curve_P384 {
+			curveImpl = ecdh.P384()
+		}
+		privkey, err := curveImpl.NewPrivateKey(key)
 		if err != nil {
 			return err
 		}

@@ -11,7 +11,7 @@
         go-test = {
           enable = true;
           name = "go test";
-          entry = "${pkgs.go_1_25}/bin/go test ./...";
+          entry = "${pkgs.coreutils}/bin/env CGO_ENABLED=0 ${pkgs.go_1_25}/bin/go test ./...";
           files = "\\.go$";
           pass_filenames = false;
         };

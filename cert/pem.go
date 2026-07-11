@@ -71,6 +71,8 @@ const ( //key-agreement-key banners
 	X25519PublicKeyBanner  = "NEBULA X25519 PUBLIC KEY"
 	P256PrivateKeyBanner   = "NEBULA P256 PRIVATE KEY"
 	P256PublicKeyBanner    = "NEBULA P256 PUBLIC KEY"
+	P384PrivateKeyBanner   = "NEBULA P384 PRIVATE KEY"
+	P384PublicKeyBanner    = "NEBULA P384 PUBLIC KEY"
 )
 
 /* including "ECDSA" in the P256 banners is a clue that these keys should be used only for signing */
@@ -78,6 +80,9 @@ const ( //signing key banners
 	EncryptedECDSAP256PrivateKeyBanner = "NEBULA ECDSA P256 ENCRYPTED PRIVATE KEY"
 	ECDSAP256PrivateKeyBanner          = "NEBULA ECDSA P256 PRIVATE KEY"
 	ECDSAP256PublicKeyBanner           = "NEBULA ECDSA P256 PUBLIC KEY"
+	EncryptedECDSAP384PrivateKeyBanner = "NEBULA ECDSA P384 ENCRYPTED PRIVATE KEY"
+	ECDSAP384PrivateKeyBanner          = "NEBULA ECDSA P384 PRIVATE KEY"
+	ECDSAP384PublicKeyBanner           = "NEBULA ECDSA P384 PUBLIC KEY"
 	EncryptedEd25519PrivateKeyBanner   = "NEBULA ED25519 ENCRYPTED PRIVATE KEY"
 	Ed25519PrivateKeyBanner            = "NEBULA ED25519 PRIVATE KEY"
 	Ed25519PublicKeyBanner             = "NEBULA ED25519 PUBLIC KEY"
@@ -130,6 +135,8 @@ func MarshalPublicKeyToPEM(curve Curve, b []byte) []byte {
 		return pem.EncodeToMemory(&pem.Block{Type: X25519PublicKeyBanner, Bytes: b})
 	case Curve_P256:
 		return pem.EncodeToMemory(&pem.Block{Type: P256PublicKeyBanner, Bytes: b})
+	case Curve_P384:
+		return pem.EncodeToMemory(&pem.Block{Type: P384PublicKeyBanner, Bytes: b})
 	default:
 		return nil
 	}
@@ -143,6 +150,8 @@ func MarshalSigningPublicKeyToPEM(curve Curve, b []byte) []byte {
 		return pem.EncodeToMemory(&pem.Block{Type: Ed25519PublicKeyBanner, Bytes: b})
 	case Curve_P256:
 		return pem.EncodeToMemory(&pem.Block{Type: ECDSAP256PublicKeyBanner, Bytes: b})
+	case Curve_P384:
+		return pem.EncodeToMemory(&pem.Block{Type: ECDSAP384PublicKeyBanner, Bytes: b})
 	default:
 		return nil
 	}
@@ -166,6 +175,9 @@ func UnmarshalPublicKeyFromPEM(b []byte) ([]byte, []byte, Curve, error) {
 		// Uncompressed
 		expectedLen = 65
 		curve = Curve_P256
+	case P384PublicKeyBanner:
+		expectedLen = 97
+		curve = Curve_P384
 	default:
 		return nil, r, 0, fmt.Errorf("bytes did not contain a proper public key banner")
 	}
@@ -193,6 +205,9 @@ func UnmarshalSigningPublicKeyFromPEM(b []byte) ([]byte, []byte, Curve, error) {
 		// Uncompressed
 		expectedLen = 65
 		curve = Curve_P256
+	case ECDSAP384PublicKeyBanner:
+		expectedLen = 97
+		curve = Curve_P384
 	default:
 		return nil, r, 0, fmt.Errorf("bytes did not contain a proper Ed25519/ECDSA public key banner")
 	}
@@ -208,6 +223,8 @@ func MarshalPrivateKeyToPEM(curve Curve, b []byte) []byte {
 		return pem.EncodeToMemory(&pem.Block{Type: X25519PrivateKeyBanner, Bytes: b})
 	case Curve_P256:
 		return pem.EncodeToMemory(&pem.Block{Type: P256PrivateKeyBanner, Bytes: b})
+	case Curve_P384:
+		return pem.EncodeToMemory(&pem.Block{Type: P384PrivateKeyBanner, Bytes: b})
 	default:
 		return nil
 	}
@@ -219,6 +236,8 @@ func MarshalSigningPrivateKeyToPEM(curve Curve, b []byte) []byte {
 		return pem.EncodeToMemory(&pem.Block{Type: Ed25519PrivateKeyBanner, Bytes: b})
 	case Curve_P256:
 		return pem.EncodeToMemory(&pem.Block{Type: ECDSAP256PrivateKeyBanner, Bytes: b})
+	case Curve_P384:
+		return pem.EncodeToMemory(&pem.Block{Type: ECDSAP384PrivateKeyBanner, Bytes: b})
 	default:
 		return nil
 	}
@@ -240,6 +259,9 @@ func UnmarshalPrivateKeyFromPEM(b []byte) ([]byte, []byte, Curve, error) {
 	case P256PrivateKeyBanner:
 		expectedLen = 32
 		curve = Curve_P256
+	case P384PrivateKeyBanner:
+		expectedLen = 48
+		curve = Curve_P384
 	default:
 		return nil, r, 0, fmt.Errorf("bytes did not contain a proper private key banner")
 	}
@@ -260,6 +282,8 @@ func UnmarshalSigningPrivateKeyFromPEM(b []byte) ([]byte, []byte, Curve, error) 
 		return nil, nil, Curve_CURVE25519, ErrPrivateKeyEncrypted
 	case EncryptedECDSAP256PrivateKeyBanner:
 		return nil, nil, Curve_P256, ErrPrivateKeyEncrypted
+	case EncryptedECDSAP384PrivateKeyBanner:
+		return nil, nil, Curve_P384, ErrPrivateKeyEncrypted
 	case Ed25519PrivateKeyBanner:
 		curve = Curve_CURVE25519
 		if len(k.Bytes) != ed25519.PrivateKeySize {
@@ -269,6 +293,11 @@ func UnmarshalSigningPrivateKeyFromPEM(b []byte) ([]byte, []byte, Curve, error) 
 		curve = Curve_P256
 		if len(k.Bytes) != 32 {
 			return nil, r, 0, fmt.Errorf("key was not 32 bytes, is invalid ECDSA P256 private key")
+		}
+	case ECDSAP384PrivateKeyBanner:
+		curve = Curve_P384
+		if len(k.Bytes) != 48 {
+			return nil, r, 0, fmt.Errorf("key was not 48 bytes, is invalid ECDSA P384 private key")
 		}
 	default:
 		return nil, r, 0, fmt.Errorf("bytes did not contain a proper Ed25519/ECDSA private key banner")

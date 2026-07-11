@@ -59,7 +59,7 @@ func newCaFlags() *caFlags {
 	cf.argonParallelism = cf.set.Uint("argon-parallelism", 4, "Optional: Argon2 parallelism parameter used for encrypted private key passphrase")
 	cf.argonIterations = cf.set.Uint("argon-iterations", 1, "Optional: Argon2 iterations parameter used for encrypted private key passphrase")
 	cf.encryption = cf.set.Bool("encrypt", false, "Optional: prompt for passphrase and write out-key in an encrypted format")
-	cf.curve = cf.set.String("curve", "25519", "EdDSA/ECDSA Curve (25519, P256)")
+	cf.curve = cf.set.String("curve", "25519", "EdDSA/ECDSA Curve (25519, P256, P384)")
 	cf.p11url = p11Flag(cf.set)
 
 	cf.ips = cf.set.String("ips", "", "Deprecated, see -networks")
@@ -249,19 +249,23 @@ func ca(args []string, out io.Writer, errOut io.Writer, pr PasswordReader) error
 			if err != nil {
 				return fmt.Errorf("error while generating ed25519 keys: %s", err)
 			}
-		case "P256":
-			var key *ecdsa.PrivateKey
+		case "P256", "P384":
+			c := elliptic.P256()
 			curve = cert.Curve_P256
-			key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-			if err != nil {
-				return fmt.Errorf("error while generating ecdsa keys: %s", err)
+			if *cf.curve == "P384" {
+				c = elliptic.P384()
+				curve = cert.Curve_P384
+			}
+			key, keyErr := ecdsa.GenerateKey(c, rand.Reader)
+			if keyErr != nil {
+				return fmt.Errorf("error while generating ecdsa keys: %s", keyErr)
 			}
 
 			// ecdh.PrivateKey lets us get at the encoded bytes, even though
 			// we aren't using ECDH here.
-			eKey, err := key.ECDH()
-			if err != nil {
-				return fmt.Errorf("error while converting ecdsa key: %s", err)
+			eKey, convertErr := key.ECDH()
+			if convertErr != nil {
+				return fmt.Errorf("error while converting ecdsa key: %s", convertErr)
 			}
 			rawPriv = eKey.Bytes()
 			pub = eKey.PublicKey().Bytes()
