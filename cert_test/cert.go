@@ -28,14 +28,20 @@ func NewTestCaCert(version cert.Version, curve cert.Curve, before, after time.Ti
 	switch curve {
 	case cert.Curve_CURVE25519:
 		pub, priv, err = ed25519.GenerateKey(rand.Reader)
-	case cert.Curve_P256:
-		privk, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	case cert.Curve_P256, cert.Curve_P384:
+		ecurve := elliptic.P256()
+		byteLen := 32
+		if curve == cert.Curve_P384 {
+			ecurve = elliptic.P384()
+			byteLen = 48
+		}
+		privk, err := ecdsa.GenerateKey(ecurve, rand.Reader)
 		if err != nil {
 			panic(err)
 		}
 
-		pub = elliptic.Marshal(elliptic.P256(), privk.PublicKey.X, privk.PublicKey.Y)
-		priv = privk.D.FillBytes(make([]byte, 32))
+		pub = elliptic.Marshal(ecurve, privk.PublicKey.X, privk.PublicKey.Y)
+		priv = privk.D.FillBytes(make([]byte, byteLen))
 	default:
 		// There is no default to allow the underlying lib to respond with an error
 	}
@@ -90,6 +96,8 @@ func NewTestCert(v cert.Version, curve cert.Curve, ca cert.Certificate, key []by
 		pub, priv = X25519Keypair()
 	case cert.Curve_P256:
 		pub, priv = P256Keypair()
+	case cert.Curve_P384:
+		pub, priv = P384Keypair()
 	default:
 		panic("unknown curve")
 	}
@@ -168,6 +176,14 @@ func P256Keypair() ([]byte, []byte) {
 	}
 	pubkey := privkey.PublicKey()
 	return pubkey.Bytes(), privkey.Bytes()
+}
+
+func P384Keypair() ([]byte, []byte) {
+	privkey, err := ecdh.P384().GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	return privkey.PublicKey().Bytes(), privkey.Bytes()
 }
 
 // DummyCert is a minimal cert.Certificate implementation for testing error paths.

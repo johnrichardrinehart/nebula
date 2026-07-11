@@ -14,6 +14,11 @@ message NebulaHandshake {
   bytes Hmac = 2;
 }
 
+message KeyCapability {
+  uint32 Curve = 1;
+  bytes Certificate = 2;
+}
+
 message NebulaHandshakeDetails {
   bytes Cert = 1;
   uint32 InitiatorIndex = 2;
@@ -24,6 +29,8 @@ message NebulaHandshakeDetails {
   uint64 Cookie = 4 [deprecated = true];
   uint64 Time = 5;
   uint32 CertVersion = 8;
+  repeated KeyCapability KeyCapabilities = 9;
+  bytes CapabilityNonce = 10;
   // reserved for WIP multiport
   reserved 6, 7;
 }

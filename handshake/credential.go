@@ -11,10 +11,11 @@ import (
 // at a given cert version. Version and Curve are read from Cert; the public
 // half of the static keypair likewise comes from Cert.PublicKey().
 type Credential struct {
-	Cert        cert.Certificate  // the certificate
-	Bytes       []byte            // pre-marshaled certificate bytes
-	privateKey  []byte            // static private key (public half lives in Cert)
-	cipherSuite noise.CipherSuite // pre-built cipher suite (DH + cipher + hash)
+	Cert                   cert.Certificate  // the certificate
+	Bytes                  []byte            // pre-marshaled certificate bytes
+	privateKey             []byte            // static private key (public half lives in Cert)
+	cipherSuite            noise.CipherSuite // pre-built cipher suite (DH + cipher + hash)
+	advertisedCapabilities []KeyCapability
 }
 
 // NewCredential creates a Credential with all material needed for handshake
@@ -34,8 +35,15 @@ func NewCredential(
 	}
 }
 
+// WithCapabilities returns the credential configured to advertise the given
+// ordered upgrade certificates during a stock-compatible bootstrap.
+func (hc *Credential) WithCapabilities(capabilities []KeyCapability) *Credential {
+	hc.advertisedCapabilities = append([]KeyCapability(nil), capabilities...)
+	return hc
+}
+
 // buildHandshakeState creates a noise.HandshakeState from this credential.
-func (hc *Credential) buildHandshakeState(initiator bool, pattern noise.HandshakePattern) (*noise.HandshakeState, error) {
+func (hc *Credential) buildHandshakeState(initiator bool, pattern noise.HandshakePattern, prologue []byte) (*noise.HandshakeState, error) {
 	return noise.NewHandshakeState(noise.Config{
 		CipherSuite:           hc.cipherSuite,
 		Random:                rand.Reader,
@@ -44,6 +52,7 @@ func (hc *Credential) buildHandshakeState(initiator bool, pattern noise.Handshak
 		StaticKeypair:         noise.DHKey{Private: hc.privateKey, Public: hc.Cert.PublicKey()},
 		PresharedKey:          []byte{},
 		PresharedKeyPlacement: 0,
+		Prologue:              prologue,
 	})
 }
 

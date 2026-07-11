@@ -15,20 +15,32 @@ var (
 // Payload represents the decoded fields of a handshake message.
 // Wire format is protobuf-compatible with NebulaHandshake{Details: NebulaHandshakeDetails{...}}.
 type Payload struct {
-	Cert           []byte
-	InitiatorIndex uint32
-	ResponderIndex uint32
-	Time           uint64
-	CertVersion    uint32
+	Cert            []byte
+	InitiatorIndex  uint32
+	ResponderIndex  uint32
+	Time            uint64
+	CertVersion     uint32
+	KeyCapabilities []KeyCapability
+	CapabilityNonce []byte
+}
+
+// KeyCapability advertises one authenticated static-key certificate.
+type KeyCapability struct {
+	Curve       uint32
+	Certificate []byte
 }
 
 // Proto field numbers for NebulaHandshakeDetails
 const (
-	fieldCert           = 1 // bytes
-	fieldInitiatorIndex = 2 // uint32
-	fieldResponderIndex = 3 // uint32
-	fieldTime           = 5 // uint64
-	fieldCertVersion    = 8 // uint32
+	fieldCert            = 1  // bytes
+	fieldInitiatorIndex  = 2  // uint32
+	fieldResponderIndex  = 3  // uint32
+	fieldTime            = 5  // uint64
+	fieldCertVersion     = 8  // uint32
+	fieldKeyCapability   = 9  // repeated KeyCapability
+	fieldCapabilityNonce = 10 // bytes
+	fieldCapabilityCurve = 1
+	fieldCapabilityCert  = 2
 )
 
 // MarshalPayload encodes a handshake payload in protobuf wire format compatible
@@ -56,6 +68,19 @@ func MarshalPayload(out []byte, p Payload) []byte {
 	if p.CertVersion != 0 {
 		details = protowire.AppendTag(details, fieldCertVersion, protowire.VarintType)
 		details = protowire.AppendVarint(details, uint64(p.CertVersion))
+	}
+	for _, capability := range p.KeyCapabilities {
+		var encoded []byte
+		encoded = protowire.AppendTag(encoded, fieldCapabilityCurve, protowire.VarintType)
+		encoded = protowire.AppendVarint(encoded, uint64(capability.Curve))
+		encoded = protowire.AppendTag(encoded, fieldCapabilityCert, protowire.BytesType)
+		encoded = protowire.AppendBytes(encoded, capability.Certificate)
+		details = protowire.AppendTag(details, fieldKeyCapability, protowire.BytesType)
+		details = protowire.AppendBytes(details, encoded)
+	}
+	if len(p.CapabilityNonce) > 0 {
+		details = protowire.AppendTag(details, fieldCapabilityNonce, protowire.BytesType)
+		details = protowire.AppendBytes(details, p.CapabilityNonce)
 	}
 
 	out = protowire.AppendTag(out, 1, protowire.BytesType)
@@ -161,6 +186,30 @@ func unmarshalPayloadDetails(p *Payload, b []byte) error {
 			}
 			p.CertVersion = uint32(v)
 			b = b[n:]
+		case fieldKeyCapability:
+			if typ != protowire.BytesType || len(p.KeyCapabilities) >= maxCurvePreferences {
+				return errInvalidHandshakeDetails
+			}
+			v, n := protowire.ConsumeBytes(b)
+			if n < 0 {
+				return errInvalidHandshakeDetails
+			}
+			capability, err := unmarshalKeyCapability(v)
+			if err != nil {
+				return err
+			}
+			p.KeyCapabilities = append(p.KeyCapabilities, capability)
+			b = b[n:]
+		case fieldCapabilityNonce:
+			if typ != protowire.BytesType {
+				return errInvalidHandshakeDetails
+			}
+			v, n := protowire.ConsumeBytes(b)
+			if n < 0 || len(v) != 32 || len(p.CapabilityNonce) != 0 {
+				return errInvalidHandshakeDetails
+			}
+			p.CapabilityNonce = append([]byte(nil), v...)
+			b = b[n:]
 		default:
 			n := protowire.ConsumeFieldValue(num, typ, b)
 			if n < 0 {
@@ -170,4 +219,47 @@ func unmarshalPayloadDetails(p *Payload, b []byte) error {
 		}
 	}
 	return nil
+}
+
+func unmarshalKeyCapability(b []byte) (KeyCapability, error) {
+	var capability KeyCapability
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			return capability, errInvalidHandshakeDetails
+		}
+		b = b[n:]
+		switch num {
+		case fieldCapabilityCurve:
+			if typ != protowire.VarintType || capability.Curve != 0 {
+				return capability, errInvalidHandshakeDetails
+			}
+			v, n := protowire.ConsumeVarint(b)
+			if n < 0 || v > math.MaxUint32 {
+				return capability, errInvalidHandshakeDetails
+			}
+			capability.Curve = uint32(v)
+			b = b[n:]
+		case fieldCapabilityCert:
+			if typ != protowire.BytesType || capability.Certificate != nil {
+				return capability, errInvalidHandshakeDetails
+			}
+			v, n := protowire.ConsumeBytes(b)
+			if n < 0 || len(v) == 0 {
+				return capability, errInvalidHandshakeDetails
+			}
+			capability.Certificate = append([]byte(nil), v...)
+			b = b[n:]
+		default:
+			n := protowire.ConsumeFieldValue(num, typ, b)
+			if n < 0 {
+				return capability, errInvalidHandshakeDetails
+			}
+			b = b[n:]
+		}
+	}
+	if capability.Curve == 0 || len(capability.Certificate) == 0 {
+		return capability, errInvalidHandshakeDetails
+	}
+	return capability, nil
 }

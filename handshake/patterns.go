@@ -31,6 +31,16 @@ var subtypeInfos = map[header.MessageSubType]subtypeInfo{
 			{expectsPayload: true, expectsCert: true},
 		},
 	},
+	// Upgrade handshakes use explicit subtypes because Noise must know DHLen
+	// before parsing public keys. Their prologue binds the bootstrap negotiation.
+	header.HandshakeIXP256Upgrade: {
+		pattern: noise.HandshakeIX,
+		msgs:    []msgFlags{{expectsPayload: true, expectsCert: true}, {expectsPayload: true, expectsCert: true}},
+	},
+	header.HandshakeIXP384Upgrade: {
+		pattern: noise.HandshakeIX,
+		msgs:    []msgFlags{{expectsPayload: true, expectsCert: true}, {expectsPayload: true, expectsCert: true}},
+	},
 
 	// XX: 3 messages
 	//   msg1 (I->R): payload only

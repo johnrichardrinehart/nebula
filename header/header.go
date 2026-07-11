@@ -60,8 +60,10 @@ const (
 )
 
 const (
-	HandshakeIXPSK0 MessageSubType = 0
-	HandshakeXXPSK0 MessageSubType = 1
+	HandshakeIXPSK0        MessageSubType = 0
+	HandshakeXXPSK0        MessageSubType = 1
+	HandshakeIXP256Upgrade MessageSubType = 2
+	HandshakeIXP384Upgrade MessageSubType = 3
 )
 
 var ErrHeaderTooShort = errors.New("header is too short")
@@ -83,7 +85,9 @@ var subTypeMap = map[MessageType]*map[MessageSubType]string{
 	Test:        &subTypeTestMap,
 	CloseTunnel: &subTypeNoneMap,
 	Handshake: {
-		HandshakeIXPSK0: "ix_psk0",
+		HandshakeIXPSK0:        "ix_psk0",
+		HandshakeIXP256Upgrade: "ix_p256_upgrade",
+		HandshakeIXP384Upgrade: "ix_p384_upgrade",
 	},
 	Control: &subTypeNoneMap,
 }

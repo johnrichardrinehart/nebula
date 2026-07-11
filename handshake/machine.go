@@ -2,6 +2,7 @@ package handshake
 
 import (
 	"bytes"
+	"crypto/rand"
 	"fmt"
 	"slices"
 	"time"
@@ -29,16 +30,20 @@ type CertVerifier func(cert.Certificate) (*cert.CachedCertificate, error)
 // Result contains the results of a successful handshake.
 // Returned by ProcessPacket when the handshake is complete.
 type Result struct {
-	EKey          *noise.CipherState
-	DKey          *noise.CipherState
-	Cipher        noise.CipherFunc // identifies which post-handshake CipherState the data plane should wrap EKey/DKey in
-	MyCert        cert.Certificate
-	RemoteCert    *cert.CachedCertificate
-	RemoteIndex   uint32
-	LocalIndex    uint32
-	HandshakeTime uint64
-	MessageIndex  uint64 // number of messages exchanged during the handshake
-	Initiator     bool
+	EKey                  *noise.CipherState
+	DKey                  *noise.CipherState
+	Cipher                noise.CipherFunc // identifies which post-handshake CipherState the data plane should wrap EKey/DKey in
+	MyCert                cert.Certificate
+	RemoteCert            *cert.CachedCertificate
+	RemoteIndex           uint32
+	LocalIndex            uint32
+	HandshakeTime         uint64
+	MessageIndex          uint64 // number of messages exchanged during the handshake
+	Initiator             bool
+	LocalCapabilities     []KeyCapability
+	LocalCapabilityNonce  []byte
+	RemoteCapabilities    []KeyCapability
+	RemoteCapabilityNonce []byte
 }
 
 // Machine drives a Noise handshake through N messages. It handles Noise
@@ -55,18 +60,19 @@ type Result struct {
 // retransmit) and the Machine can accept another packet. If Failed() is
 // true the Machine is unrecoverable and the caller must abandon it.
 type Machine struct {
-	hs             *noise.HandshakeState
-	getCred        GetCredentialFunc
-	allocIndex     IndexAllocator
-	verifier       CertVerifier
-	result         *Result
-	msgs           []msgFlags
-	myVersion      cert.Version
-	subtype        header.MessageSubType
-	indexAllocated bool
-	remoteCertSet  bool
-	payloadSet     bool
-	failed         bool
+	hs              *noise.HandshakeState
+	getCred         GetCredentialFunc
+	allocIndex      IndexAllocator
+	verifier        CertVerifier
+	result          *Result
+	msgs            []msgFlags
+	myVersion       cert.Version
+	subtype         header.MessageSubType
+	indexAllocated  bool
+	remoteCertSet   bool
+	payloadSet      bool
+	failed          bool
+	capabilityNonce []byte
 }
 
 // NewMachine creates a handshake state machine. The subtype determines both
@@ -81,29 +87,67 @@ func NewMachine(
 	initiator bool,
 	subtype header.MessageSubType,
 ) (*Machine, error) {
+	return NewMachineWithPrologue(version, getCred, verifier, allocIndex, initiator, subtype, nil)
+}
+
+// NewMachineWithPrologue creates a machine whose Noise transcript is bound to
+// an authenticated bootstrap negotiation. Upgrade subtypes require a non-empty
+// prologue; the stock-compatible subtype requires none.
+func NewMachineWithPrologue(
+	version cert.Version,
+	getCred GetCredentialFunc,
+	verifier CertVerifier,
+	allocIndex IndexAllocator,
+	initiator bool,
+	subtype header.MessageSubType,
+	prologue []byte,
+) (*Machine, error) {
 	info, err := subtypeInfoFor(subtype)
 	if err != nil {
 		return nil, err
+	}
+
+	isUpgrade := subtype == header.HandshakeIXP256Upgrade || subtype == header.HandshakeIXP384Upgrade
+	if !isUpgrade && len(prologue) != 0 {
+		return nil, fmt.Errorf("non-upgrade handshake must not use an upgrade prologue")
+	}
+	if isUpgrade && len(prologue) == 0 {
+		return nil, fmt.Errorf("upgrade handshake requires negotiation prologue")
 	}
 
 	cred := getCred(version)
 	if cred == nil {
 		return nil, fmt.Errorf("%w: %v", ErrNoCredential, version)
 	}
+	if subtype == header.HandshakeIXP256Upgrade && cred.Cert.Curve() != cert.Curve_P256 {
+		return nil, fmt.Errorf("P-256 upgrade requires P-256 credential")
+	}
+	if subtype == header.HandshakeIXP384Upgrade && cred.Cert.Curve() != cert.Curve_P384 {
+		return nil, fmt.Errorf("P-384 upgrade requires P-384 credential")
+	}
 
-	hs, err := cred.buildHandshakeState(initiator, info.pattern)
+	hs, err := cred.buildHandshakeState(initiator, info.pattern, prologue)
 	if err != nil {
 		return nil, fmt.Errorf("build noise state: %w", err)
 	}
 
+	var capabilityNonce []byte
+	if subtype == header.HandshakeIXPSK0 && len(cred.advertisedCapabilities) > 0 {
+		capabilityNonce = make([]byte, 32)
+		if _, err := rand.Read(capabilityNonce); err != nil {
+			return nil, fmt.Errorf("generate capability nonce: %w", err)
+		}
+	}
+
 	return &Machine{
-		hs:         hs,
-		subtype:    subtype,
-		msgs:       info.msgs,
-		getCred:    getCred,
-		allocIndex: allocIndex,
-		verifier:   verifier,
-		myVersion:  version,
+		hs:              hs,
+		subtype:         subtype,
+		msgs:            info.msgs,
+		getCred:         getCred,
+		allocIndex:      allocIndex,
+		verifier:        verifier,
+		myVersion:       version,
+		capabilityNonce: capabilityNonce,
 		result: &Result{
 			Initiator: initiator,
 			Cipher:    cred.cipherSuite,
@@ -329,10 +373,29 @@ func (m *Machine) processPayload(msg []byte, flags msgFlags) error {
 		m.payloadSet = true
 	}
 
+	if len(payload.KeyCapabilities) > 0 || len(payload.CapabilityNonce) > 0 {
+		if m.subtype != header.HandshakeIXPSK0 || len(payload.KeyCapabilities) == 0 || len(payload.CapabilityNonce) != 32 {
+			m.failed = true
+			return ErrUnexpectedContent
+		}
+		if _, err := capabilityCurves(payload.KeyCapabilities); err != nil {
+			m.failed = true
+			return err
+		}
+		m.result.RemoteCapabilities = append([]KeyCapability(nil), payload.KeyCapabilities...)
+		m.result.RemoteCapabilityNonce = append([]byte(nil), payload.CapabilityNonce...)
+	}
+
 	// Process certificate
 	if flags.expectsCert {
 		if err := m.validateCert(payload); err != nil {
 			return err
+		}
+		if len(payload.KeyCapabilities) > 0 {
+			if _, err := ValidateCapabilities(payload, m.result.RemoteCert.Certificate, m.verifier); err != nil {
+				m.failed = true
+				return fmt.Errorf("validate capabilities: %w", err)
+			}
 		}
 	}
 
@@ -411,6 +474,12 @@ func (m *Machine) marshalOutgoing(flags msgFlags) ([]byte, error) {
 		p.Cert = cred.Bytes
 		p.CertVersion = uint32(cred.Cert.Version())
 		m.result.MyCert = cred.Cert
+		if m.subtype == header.HandshakeIXPSK0 && len(cred.advertisedCapabilities) > 0 {
+			p.KeyCapabilities = append([]KeyCapability(nil), cred.advertisedCapabilities...)
+			p.CapabilityNonce = append([]byte(nil), m.capabilityNonce...)
+			m.result.LocalCapabilities = append([]KeyCapability(nil), p.KeyCapabilities...)
+			m.result.LocalCapabilityNonce = append([]byte(nil), p.CapabilityNonce...)
+		}
 	}
 
 	return MarshalPayload(nil, p), nil
