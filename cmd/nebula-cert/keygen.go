@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/slackhq/nebula/pkclient"
+	"github.com/slackhq/nebula/tpmclient"
 
 	"github.com/slackhq/nebula/cert"
 )
@@ -17,6 +18,7 @@ type keygenFlags struct {
 	outPubPath *string
 	curve      *string
 	p11url     *string
+	tpmurl     *string
 }
 
 func newKeygenFlags() *keygenFlags {
@@ -26,6 +28,7 @@ func newKeygenFlags() *keygenFlags {
 	cf.outKeyPath = cf.set.String("out-key", "", "Required: path to write the private key to")
 	cf.curve = cf.set.String("curve", "25519", "ECDH Curve (25519, P256, P384)")
 	cf.p11url = p11Flag(cf.set)
+	cf.tpmurl = cf.set.String("tpm", "", "TPM2 persistent ECDH key URI")
 	return &cf
 }
 
@@ -37,13 +40,17 @@ func keygen(args []string, out io.Writer, errOut io.Writer) error {
 	}
 
 	isP11 := len(*cf.p11url) > 0
+	isTPM := len(*cf.tpmurl) > 0
+	if isP11 && isTPM {
+		return newHelpErrorf("cannot set both -pkcs11 and -tpm")
+	}
 
-	if !isP11 {
+	if !isP11 && !isTPM {
 		if err = mustFlagString("out-key", cf.outKeyPath); err != nil {
 			return err
 		}
 	} else if *cf.outKeyPath != "" {
-		return newHelpErrorf("cannot set -out-key with -pkcs11")
+		return newHelpErrorf("cannot set -out-key with a hardware-backed key")
 	}
 	if err = mustFlagString("out-pub", cf.outPubPath); err != nil {
 		return err
@@ -57,6 +64,21 @@ func keygen(args []string, out io.Writer, errOut io.Writer) error {
 			curve = cert.Curve_P256
 		default:
 			return fmt.Errorf("invalid curve for PKCS#11: %s", *cf.curve)
+		}
+	} else if isTPM {
+		key, parseErr := tpmclient.ParseKeyURI(*cf.tpmurl)
+		if parseErr != nil {
+			return parseErr
+		}
+		switch key.CurveName() {
+		case "P256":
+			curve = cert.Curve_P256
+		case "P384":
+			curve = cert.Curve_P384
+		}
+		pub, err = key.PublicKey()
+		if err != nil {
+			return fmt.Errorf("read TPM public key: %w", err)
 		}
 	} else {
 		switch *cf.curve {
@@ -94,7 +116,7 @@ func keygen(args []string, out io.Writer, errOut io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("error while getting public key: %w", err)
 		}
-	} else {
+	} else if !isTPM {
 		err = writeOutput(*cf.outKeyPath, cert.MarshalPrivateKeyToPEM(curve, rawPriv), 0600, out)
 		if err != nil {
 			return fmt.Errorf("error while writing out-key: %s", err)

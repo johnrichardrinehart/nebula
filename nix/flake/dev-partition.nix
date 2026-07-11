@@ -17,6 +17,10 @@
     {
       checks = {
         inherit (self'.packages) nebula;
+        tpm-ecdh = import ../checks/tpm-ecdh.nix {
+          inherit pkgs;
+          tpmclientTest = self'.packages.tpmclient-test;
+        };
       };
 
       devShells.default = pkgs.mkShell {

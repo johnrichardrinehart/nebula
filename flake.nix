@@ -14,6 +14,7 @@
     let
       lib = nixpkgs.lib;
       goSources = lib.fileset.fileFilter (file: file.hasExt "go") ./.;
+      goVendorHash = "sha256-qhEnYgHcvWdiQ9DsPbUoTGRst/ojzsuHhqacZcdmO8w=";
       packageSource = lib.fileset.toSource {
         root = ./.;
         fileset = lib.fileset.unions [
@@ -50,7 +51,7 @@
               pname = "nebula";
               version = "unstable";
               src = packageSource;
-              vendorHash = "sha256-qhEnYgHcvWdiQ9DsPbUoTGRst/ojzsuHhqacZcdmO8w=";
+              vendorHash = goVendorHash;
 
               subPackages = [
                 "cmd/nebula"
@@ -69,6 +70,25 @@
                 mainProgram = "nebula";
               };
             };
+
+            tpmclient-test = pkgs.buildGoModule {
+              pname = "nebula-tpmclient-test";
+              version = "unstable";
+              src = packageSource;
+              vendorHash = goVendorHash;
+              buildPhase = ''
+                runHook preBuild
+                go test -c -o tpmclient.test ./tpmclient
+                runHook postBuild
+              '';
+              installPhase = ''
+                runHook preInstall
+                install -Dm755 tpmclient.test $out/bin/tpmclient.test
+                runHook postInstall
+              '';
+              doCheck = false;
+            };
+
             default = nebula;
           };
         };
