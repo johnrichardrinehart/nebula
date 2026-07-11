@@ -27,15 +27,25 @@ pkgs.testers.runNixOSTest {
         serviceConfig.ExecStart = "${nebula}/bin/nebula -config /var/lib/nebula-mixed/config.yml";
       };
     };
+    software = { ... }: {
+      networking.firewall.allowedUDPPorts = [ 4242 ];
+      environment.systemPackages = [ nebula ];
+      systemd.services.nebula-mixed = {
+        serviceConfig.ExecStart = "${nebula}/bin/nebula -config /var/lib/nebula-mixed/config.yml";
+      };
+    };
   };
 
   testScript = ''
     initiator.start()
     responder.start()
+    software.start()
     initiator.wait_for_unit("multi-user.target")
     responder.wait_for_unit("multi-user.target")
+    software.wait_for_unit("multi-user.target")
     initiator.succeed("install -d /var/lib/nebula-mixed /tmp/identity")
     responder.succeed("install -d /var/lib/nebula-mixed")
+    software.succeed("install -d /var/lib/nebula-mixed")
 
     for curve in ["25519", "P256", "P384"]:
       initiator.succeed(
@@ -58,12 +68,14 @@ pkgs.testers.runNixOSTest {
 
     make_identity("initiator", "10.77.0.1")
     make_identity("responder", "10.77.0.2")
+    make_identity("software", "10.77.0.3")
     initiator.succeed("cat /tmp/identity/{25519,P256,P384}.ca.crt > /tmp/identity/ca-bundle.crt")
 
     for filename in initiator.succeed("find /tmp/identity -type f -printf '%f\\n'").split():
       encoded = initiator.succeed(f"base64 -w0 /tmp/identity/{filename}").strip()
       initiator.succeed(f"printf %s {encoded} | base64 -d > /var/lib/nebula-mixed/{filename}")
       responder.succeed(f"printf %s {encoded} | base64 -d > /var/lib/nebula-mixed/{filename}")
+      software.succeed(f"printf %s {encoded} | base64 -d > /var/lib/nebula-mixed/{filename}")
 
     def install_tpm_identity(node, name, ip, curve, handle, point_bytes):
       alg = "ecc256:ecdh-sha256" if curve == "P256" else "ecc384:ecdh-sha384"
@@ -83,12 +95,20 @@ pkgs.testers.runNixOSTest {
     install_tpm_identity(responder, "responder", "10.77.0.2", "P384", "0x81010121", 97)
 
     def configure(node, name, peer, local_underlay, peer_underlay, preferences):
-      p256_handle = "0x81010110" if name == "initiator" else "0x81010120"
-      p384_handle = "0x81010111" if name == "initiator" else "0x81010121"
-      node.succeed(f"cat > /var/lib/nebula-mixed/config.yml <<'EOF'\npki:\n  ca: /var/lib/nebula-mixed/ca-bundle.crt\n  cert: /var/lib/nebula-mixed/{name}.25519.crt\n  key: /var/lib/nebula-mixed/{name}.25519.key\n  p256_cert: /var/lib/nebula-mixed/{name}.P256.crt\n  p256_key: tpm2:device=/dev/tpmrm0;handle={p256_handle};curve=P256\n  p384_cert: /var/lib/nebula-mixed/{name}.P384.crt\n  p384_key: tpm2:device=/dev/tpmrm0;handle={p384_handle};curve=P384\n  curve_preferences: [{preferences}]\nhandshakes:\n  capability_cache_path: /var/lib/nebula-mixed/capabilities.json\nstatic_host_map:\n  '{peer}': ['{peer_underlay}:4242']\nlisten:\n  host: {local_underlay}\n  port: 4242\nfirewall:\n  inbound:\n    - port: any\n      proto: any\n      host: any\n  outbound:\n    - port: any\n      proto: any\n      host: any\nEOF")
+      if name == "software":
+        p256_key = f"/var/lib/nebula-mixed/{name}.P256.key"
+        p384_key = f"/var/lib/nebula-mixed/{name}.P384.key"
+      else:
+        p256_handle = "0x81010110" if name == "initiator" else "0x81010120"
+        p384_handle = "0x81010111" if name == "initiator" else "0x81010121"
+        p256_key = f"tpm2:device=/dev/tpmrm0;handle={p256_handle};curve=P256"
+        p384_key = f"tpm2:device=/dev/tpmrm0;handle={p384_handle};curve=P384"
+      node.succeed(f"cat > /var/lib/nebula-mixed/config.yml <<'EOF'\npki:\n  ca: /var/lib/nebula-mixed/ca-bundle.crt\n  cert: /var/lib/nebula-mixed/{name}.25519.crt\n  key: /var/lib/nebula-mixed/{name}.25519.key\n  p256_cert: /var/lib/nebula-mixed/{name}.P256.crt\n  p256_key: {p256_key}\n  p384_cert: /var/lib/nebula-mixed/{name}.P384.crt\n  p384_key: {p384_key}\n  curve_preferences: [{preferences}]\nhandshakes:\n  capability_cache_path: /var/lib/nebula-mixed/capabilities.json\nstatic_host_map:\n  '{peer}': ['{peer_underlay}:4242']\nlisten:\n  host: {local_underlay}\n  port: 4242\nfirewall:\n  inbound:\n    - port: any\n      proto: any\n      host: any\n  outbound:\n    - port: any\n      proto: any\n      host: any\nEOF")
 
     configure(initiator, "initiator", "10.77.0.2", "192.168.1.1", "192.168.1.2", "P384, P256")
     configure(responder, "responder", "10.77.0.1", "192.168.1.2", "192.168.1.1", "P256, P384")
+    configure(software, "software", "10.77.0.1", "192.168.1.3", "192.168.1.1", "P384, P256")
+    software.succeed("systemctl start nebula-mixed.service")
     responder.succeed("systemctl start nebula-mixed.service")
     initiator.succeed("systemctl start nebula-mixed.service")
     initiator.wait_until_succeeds("ping -c1 -W1 10.77.0.2", timeout=60)
@@ -96,6 +116,10 @@ pkgs.testers.runNixOSTest {
     initiator.wait_until_succeeds("journalctl -u nebula-mixed | grep 'Authenticated mixed-curve upgrade negotiated' | grep P384", timeout=30)
     initiator.wait_until_succeeds("journalctl -u nebula-mixed | grep ix_p384_upgrade", timeout=30)
     responder.wait_until_succeeds("journalctl -u nebula-mixed | grep ix_p384_upgrade", timeout=30)
+
+    # One-TPM matrix: software P-384 interoperates with TPM-resident P-384.
+    software.wait_until_succeeds("ping -c1 -W1 10.77.0.1", timeout=60)
+    software.wait_until_succeeds("journalctl -u nebula-mixed | grep ix_p384_upgrade", timeout=30)
 
     # Force the second implemented combination and prove a real P-256 daemon tunnel.
     initiator.succeed("sed -i 's/curve_preferences: \\[P384, P256\\]/curve_preferences: [P256]/' /var/lib/nebula-mixed/config.yml")
@@ -105,11 +129,23 @@ pkgs.testers.runNixOSTest {
     initiator.wait_until_succeeds("ping -c1 -W1 10.77.0.2", timeout=60)
     initiator.wait_until_succeeds("journalctl -u nebula-mixed --since '-1 minute' | grep ix_p256_upgrade", timeout=30)
 
+    # One-TPM matrix: switch the software peer and TPM peer to P-256.
+    software.succeed("sed -i 's/curve_preferences: \\[P384, P256\\]/curve_preferences: [P256]/' /var/lib/nebula-mixed/config.yml")
+    software.succeed("systemctl restart nebula-mixed.service")
+    software.wait_until_succeeds("ping -c1 -W1 10.77.0.1", timeout=60)
+    software.wait_until_succeeds("journalctl -u nebula-mixed --since '-1 minute' | grep ix_p256_upgrade", timeout=30)
+
     # Restart the observer too: persisted history must still reject stripping.
     initiator.succeed("systemctl restart nebula-mixed.service")
     responder.succeed("sed -i '/p256_/d; /p384_/d; /curve_preferences/d' /var/lib/nebula-mixed/config.yml")
     responder.succeed("systemctl restart nebula-mixed.service")
     initiator.fail("ping -c2 -W1 10.77.0.2")
     initiator.wait_until_succeeds("journalctl -u nebula-mixed | grep 'Rejecting authenticated X25519 downgrade'", timeout=30)
+
+    # XFAIL: a configured TPM URI whose persistent object is absent fails closed.
+    software.succeed("systemctl stop nebula-mixed.service")
+    software.succeed("sed -i 's|p256_key: .*|p256_key: tpm2:device=/dev/tpmrm0;handle=0x8101ffff;curve=P256|' /var/lib/nebula-mixed/config.yml")
+    software.succeed("systemctl start nebula-mixed.service")
+    software.wait_until_succeeds("systemctl is-failed nebula-mixed.service", timeout=30)
   '';
 }
