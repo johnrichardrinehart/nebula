@@ -18,6 +18,13 @@ let
       | ${nebula}/bin/nebula-keyring -description nebula-host-key -- \
         ${nebula}/bin/nebula -config /var/lib/nebula-test/config.yml
   '';
+  fallbackLaunch = pkgs.writeShellScript "nebula-memory-fallback" ''
+    set -euo pipefail
+    mkfifo /run/nebula-fallback/host-key
+    cat /run/nebula-fallback/host-key \
+      | ${nebula}/bin/nebula-keyring -description nebula-fallback-key -- \
+        ${pkgs.bash}/bin/bash -c 'while [[ ! -s /var/lib/nebula-fallback/host.crt || ! -s /var/lib/nebula-fallback/config.yml ]]; do sleep 0.05; done; exec ${nebula}/bin/nebula -config /var/lib/nebula-fallback/config.yml'
+  '';
 in
 pkgs.testers.runNixOSTest {
   name = "nebula-sealed-x25519";
@@ -56,6 +63,24 @@ pkgs.testers.runNixOSTest {
     };
   };
 
+  nodes.fallback = { ... }: {
+    networking.firewall.allowedUDPPorts = [ 4242 ];
+    environment.systemPackages = [
+      nebula
+      pkgs.keyutils
+    ];
+    systemd.services.nebula-fallback = {
+      serviceConfig = {
+        ExecStart = fallbackLaunch;
+        RuntimeDirectory = "nebula-fallback";
+        StateDirectory = "nebula-fallback";
+        KeyringMode = "private";
+        LimitCORE = 0;
+        NoNewPrivileges = true;
+      };
+    };
+  };
+
   nodes.stock = { ... }: {
     networking.firewall.allowedUDPPorts = [ 4242 ];
     environment.systemPackages = [
@@ -72,8 +97,10 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     machine.start()
+    fallback.start()
     stock.start()
     machine.wait_for_unit("multi-user.target")
+    fallback.wait_for_unit("multi-user.target")
     stock.wait_for_unit("multi-user.target")
     machine.succeed("install -d -m 0755 /var/lib/nebula-test")
 
@@ -101,15 +128,25 @@ pkgs.testers.runNixOSTest {
       "-out-crt /var/lib/nebula-test/host.crt"
     )
     machine.succeed("nebula-cert keygen -out-key /tmp/stock.key -out-pub /tmp/stock.pub")
+    fallback.succeed("install -d /var/lib/nebula-fallback")
+    # The forked no-TPM service reads its key from a FIFO into a private
+    # session keyring; no plaintext private-key file is created.
+    fallback.succeed("systemctl start nebula-fallback.service")
+    fallback.wait_until_succeeds("test -p /run/nebula-fallback/host-key")
+    fallback.execute("nebula-cert keygen -out-key /run/nebula-fallback/host-key -out-pub /var/lib/nebula-fallback/host.pub")
+    fallback.wait_until_succeeds("test -s /var/lib/nebula-fallback/host.pub")
     machine.succeed(
       "nebula-cert sign -ca-crt /var/lib/nebula-test/ca.crt -ca-key /var/lib/nebula-test/ca.key "
       "-name stock -ip 10.42.42.2/24 -in-pub /tmp/stock.pub -out-crt /tmp/stock.crt"
     )
+    fallback_pub = fallback.succeed("base64 -w0 /var/lib/nebula-fallback/host.pub").strip()
+    machine.succeed(f"printf %s {fallback_pub} | base64 -d > /tmp/fallback.pub")
+    machine.succeed("nebula-cert sign -ca-crt /var/lib/nebula-test/ca.crt -ca-key /var/lib/nebula-test/ca.key -name fallback -ip 10.42.42.3/24 -in-pub /tmp/fallback.pub -out-crt /tmp/fallback.crt")
     machine.succeed("rm /var/lib/nebula-test/ca.key")
     machine.succeed("test ! -e /var/lib/nebula-test/host.key")
     machine.succeed("! grep -R 'NEBULA X25519 PRIVATE KEY' /var/lib/nebula-test")
 
-    machine.succeed("cat > /var/lib/nebula-test/config.yml <<'EOF'\npki:\n  ca: /var/lib/nebula-test/ca.crt\n  cert: /var/lib/nebula-test/host.crt\n  key: keyring:nebula-host-key\nstatic_host_map:\n  '10.42.42.2': ['192.168.1.2:4242']\nlisten:\n  host: 0.0.0.0\n  port: 4242\nfirewall:\n  inbound:\n    - port: any\n      proto: any\n      host: any\n  outbound:\n    - port: any\n      proto: any\n      host: any\nEOF")
+    machine.succeed("cat > /var/lib/nebula-test/config.yml <<'EOF'\npki:\n  ca: /var/lib/nebula-test/ca.crt\n  cert: /var/lib/nebula-test/host.crt\n  key: keyring:nebula-host-key\nstatic_host_map:\n  '10.42.42.2': ['192.168.1.3:4242']\nlisten:\n  host: 0.0.0.0\n  port: 4242\nfirewall:\n  inbound:\n    - port: any\n      proto: any\n      host: any\n  outbound:\n    - port: any\n      proto: any\n      host: any\nEOF")
     machine.succeed("chmod -R a+rX /var/lib/nebula-test")
 
     stock.succeed("install -d -m 0755 /var/lib/nebula-stock")
@@ -120,8 +157,18 @@ pkgs.testers.runNixOSTest {
     ]:
       encoded = machine.succeed(f"base64 -w0 {source}").strip()
       stock.succeed(f"printf %s {encoded} | base64 -d > {destination}")
-    stock.succeed("cat > /var/lib/nebula-stock/config.yml <<'EOF'\npki:\n  ca: /var/lib/nebula-stock/ca.crt\n  cert: /var/lib/nebula-stock/host.crt\n  key: /var/lib/nebula-stock/host.key\nstatic_host_map:\n  '10.42.42.1': ['192.168.1.1:4242']\nlisten:\n  host: 0.0.0.0\n  port: 4242\nfirewall:\n  inbound:\n    - port: any\n      proto: any\n      host: any\n  outbound:\n    - port: any\n      proto: any\n      host: any\nEOF")
+    stock.succeed("cat > /var/lib/nebula-stock/config.yml <<'EOF'\npki:\n  ca: /var/lib/nebula-stock/ca.crt\n  cert: /var/lib/nebula-stock/host.crt\n  key: /var/lib/nebula-stock/host.key\nstatic_host_map:\n  '10.42.42.1': ['192.168.1.2:4242']\nlisten:\n  host: 0.0.0.0\n  port: 4242\nfirewall:\n  inbound:\n    - port: any\n      proto: any\n      host: any\n  outbound:\n    - port: any\n      proto: any\n      host: any\nEOF")
     stock.succeed("systemctl start nebula-stock.service")
+
+    for source, destination in [
+      ("/var/lib/nebula-test/ca.crt", "/var/lib/nebula-fallback/ca.crt"),
+      ("/tmp/fallback.crt", "/var/lib/nebula-fallback/host.crt"),
+    ]:
+      encoded = machine.succeed(f"base64 -w0 {source}").strip()
+      fallback.succeed(f"printf %s {encoded} | base64 -d > {destination}")
+    fallback.succeed("cat > /var/lib/nebula-fallback/config.yml <<'EOF'\npki:\n  ca: /var/lib/nebula-fallback/ca.crt\n  cert: /var/lib/nebula-fallback/host.crt\n  key: keyring:nebula-fallback-key\nstatic_host_map:\n  '10.42.42.1': ['192.168.1.2:4242']\nlisten:\n  host: 0.0.0.0\n  port: 4242\nfirewall:\n  inbound:\n    - port: any\n      proto: any\n      host: any\n  outbound:\n    - port: any\n      proto: any\n      host: any\nEOF")
+    fallback.wait_until_succeeds("systemctl is-active nebula-fallback.service", timeout=30)
+    fallback.succeed("test ! -e /var/lib/nebula-fallback/host.key")
 
     machine.succeed("systemctl start nebula-sealed-test.service")
     machine.wait_for_unit("nebula-sealed-test.service")
@@ -135,7 +182,10 @@ pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds("ping -c1 -W1 10.42.42.2", timeout=60)
     stock.wait_until_succeeds("ping -c1 -W1 10.42.42.1", timeout=60)
     stock.succeed("systemctl is-active nebula-stock.service")
-    # This node has no TPM; exercise the mlocked, non-dumpable encrypted-memory fallback.
+    # The TPM-free fork daemon establishes a real tunnel using protected memory.
+    fallback.wait_until_succeeds("ping -c1 -W1 10.42.42.1", timeout=60)
+    fallback.succeed("test ! -e /var/lib/nebula-fallback/host.key")
+    fallback.succeed("pid=$(pgrep -x nebula); grep -q '^VmLck:[[:space:]]*[1-9]' /proc/$pid/status; grep -q '^CoreDumping:[[:space:]]*0' /proc/$pid/status")
     stock.succeed("securekey.test -test.v")
 
     machine.succeed("systemctl restart nebula-sealed-test.service")
