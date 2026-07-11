@@ -50,7 +50,9 @@ type HandshakeConfig struct {
 	retries       int64
 	triggerBuffer int
 
-	messageMetrics *MessageMetrics
+	messageMetrics                   *MessageMetrics
+	capabilityCachePath              string
+	allowAuthenticatedX25519Fallback bool
 }
 
 type HandshakeManager struct {
@@ -133,7 +135,7 @@ func NewHandshakeManager(l *slog.Logger, mainHostMap *HostMap, lightHouse *Light
 		messageMetrics:         config.messageMetrics,
 		upgradePlans:           make(map[netip.Addr]handshake.UpgradePlan),
 		upgradeRemotes:         make(map[netip.AddrPort]handshake.UpgradePlan),
-		capabilityCache:        handshake.NewCapabilityCache(),
+		capabilityCache:        handshake.NewCapabilityCache(config.capabilityCachePath),
 		metricInitiated:        metrics.GetOrRegisterCounter("handshake_manager.initiated", nil),
 		metricTimedOut:         metrics.GetOrRegisterCounter("handshake_manager.timed_out", nil),
 		l:                      l,
@@ -1061,7 +1063,7 @@ func (hm *HandshakeManager) observeCapabilities(result *handshake.Result, via Vi
 		remote.Fingerprint,
 		remote.Certificate.NotAfter(),
 		len(result.RemoteCapabilities) > 0,
-		false,
+		hm.config.allowAuthenticatedX25519Fallback,
 		time.Now(),
 	)
 	if err != nil {

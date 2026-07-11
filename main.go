@@ -195,11 +195,17 @@ func Main(c *config.C, configTest bool, buildVersion string, l *slog.Logger, dev
 		messageMetrics = newMessageMetricsOnlyRecvError()
 	}
 
+	capabilityCachePath := c.GetString("handshakes.capability_cache_path", "")
+	if len(pki.getCertState().CurvePreferences()) > 0 && capabilityCachePath == "" {
+		return nil, fmt.Errorf("handshakes.capability_cache_path is required when mixed-curve credentials are configured")
+	}
 	handshakeConfig := HandshakeConfig{
-		tryInterval:    c.GetDuration("handshakes.try_interval", DefaultHandshakeTryInterval),
-		retries:        int64(c.GetInt("handshakes.retries", DefaultHandshakeRetries)),
-		triggerBuffer:  c.GetInt("handshakes.trigger_buffer", DefaultHandshakeTriggerBuffer),
-		messageMetrics: messageMetrics,
+		tryInterval:                      c.GetDuration("handshakes.try_interval", DefaultHandshakeTryInterval),
+		retries:                          int64(c.GetInt("handshakes.retries", DefaultHandshakeRetries)),
+		triggerBuffer:                    c.GetInt("handshakes.trigger_buffer", DefaultHandshakeTriggerBuffer),
+		messageMetrics:                   messageMetrics,
+		capabilityCachePath:              capabilityCachePath,
+		allowAuthenticatedX25519Fallback: c.GetBool("handshakes.allow_authenticated_x25519_fallback", false),
 	}
 
 	handshakeManager := NewHandshakeManager(l, hostMap, lightHouse, udpConns[0], handshakeConfig)

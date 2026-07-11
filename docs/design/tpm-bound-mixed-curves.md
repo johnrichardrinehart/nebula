@@ -93,12 +93,17 @@ selection. Future algorithms require new explicit subtype assignments.
 A stock peer sends no capability extension and continues on X25519. A forked
 peer that advertises an upgrade but fails or suppresses it is not silently
 accepted as stock. The connection fails unless an administrator explicitly
-sets a per-peer or global `allow_authenticated_x25519_fallback` policy.
+sets the global `handshakes.allow_authenticated_x25519_fallback` policy. It
+defaults to false and applies only after the peer's bootstrap identity has been
+authenticated.
 
 To prevent a previously observed capable peer from being impersonated as a
 stock peer through extension stripping, capability state is cached by
-certificate fingerprint for at least the certificate lifetime. Administrators
-may clear this cache during an intentional downgrade. Because the initial list
+certificate fingerprint for at least the certificate lifetime in the mode-0600
+file configured by `handshakes.capability_cache_path`. This writable path is
+required whenever mixed-curve credentials are configured, so daemon restart
+does not erase downgrade history. Administrators may clear this cache during
+an intentional downgrade. Because the initial list
 is already Noise-authenticated, an on-path attacker cannot alter it; the cache
 covers denial/replay behavior across separate connection attempts.
 
@@ -143,7 +148,9 @@ Mixed-curve daemon operation keeps the stock v2 X25519 credential in
 `pki.cert`/`pki.key` and accepts optional `pki.p256_cert`, `pki.p256_key`,
 `pki.p384_cert`, and `pki.p384_key` pairs. `pki.curve_preferences` orders the
 configured upgrades, for example `[P384, P256]`. Every curve-specific CA must
-be present in `pki.ca`. Fork peers first establish the stock-compatible tunnel,
+be present in `pki.ca`. `handshakes.capability_cache_path` names the persistent
+downgrade-state file; `handshakes.allow_authenticated_x25519_fallback` is the
+explicit global compatibility override and defaults to false. Fork peers first establish the stock-compatible tunnel,
 then automatically negotiate and replace it with the selected explicit upgrade.
 Upgrade-over-relay is currently rejected rather than silently falling back;
 direct peer endpoints are required for mixed-curve upgrade.
