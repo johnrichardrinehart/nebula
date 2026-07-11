@@ -74,11 +74,18 @@ pkgs.testers.runNixOSTest {
     systemd.services.nebula-fallback = {
       serviceConfig = {
         ExecStart = fallbackLaunch;
+        DynamicUser = true;
+        AmbientCapabilities = [ "CAP_NET_ADMIN" ];
+        CapabilityBoundingSet = [ "CAP_NET_ADMIN" ];
         RuntimeDirectory = "nebula-fallback";
         StateDirectory = "nebula-fallback";
         KeyringMode = "private";
         LimitCORE = 0;
         NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        RestrictSUIDSGID = true;
       };
     };
   };
@@ -189,8 +196,11 @@ pkgs.testers.runNixOSTest {
     fallback.succeed("test ! -e /var/lib/nebula-fallback/host.key")
     fallback.succeed("pid=$(pgrep -x nebula); grep -q '^VmLck:[[:space:]]*[1-9]' /proc/$pid/status; grep -q '^CoreDumping:[[:space:]]*0' /proc/$pid/status")
     fallback.succeed("! keyctl search @s user nebula-fallback-key")
-    fallback.succeed("pid=$(pgrep -x nebula); ! setpriv --reuid=nobody --regid=nogroup --clear-groups strace -p $pid -o /tmp/trace")
-    fallback.succeed("pid=$(pgrep -x nebula); ! setpriv --reuid=nobody --regid=nogroup --clear-groups criu dump -t $pid -D /tmp -o criu.log")
+    # Use the daemon's own dynamic UID: failure is caused by PR_SET_DUMPABLE/
+    # PR_SET_PTRACER, not ordinary cross-UID ownership checks.
+    fallback.succeed("pid=$(pgrep -x nebula); uid=$(awk '/^Uid:/{print $2}' /proc/$pid/status); ! setpriv --reuid=$uid --regid=$uid --clear-groups strace -p $pid -o /tmp/trace")
+    fallback.succeed("pid=$(pgrep -x nebula); uid=$(awk '/^Uid:/{print $2}' /proc/$pid/status); ! setpriv --reuid=$uid --regid=$uid --clear-groups criu dump -t $pid -D /tmp -o criu.log")
+    fallback.succeed("systemctl show nebula-fallback -p DynamicUser -p KeyringMode -p LimitCORE -p ProtectSystem -p ProtectHome -p RestrictSUIDSGID | grep -E 'DynamicUser=yes|KeyringMode=private|LimitCORE=0|ProtectSystem=strict|ProtectHome=yes|RestrictSUIDSGID=yes'")
     stock.succeed("securekey.test -test.v")
 
     machine.succeed("systemctl restart nebula-sealed-test.service")
