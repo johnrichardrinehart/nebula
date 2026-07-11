@@ -85,8 +85,7 @@ func ValidateCapabilities(payload Payload, bootstrap cert.Certificate, verifier 
 		if c.Name() != bootstrap.Name() ||
 			!slices.Equal(c.Networks(), bootstrap.Networks()) ||
 			!slices.Equal(c.UnsafeNetworks(), bootstrap.UnsafeNetworks()) ||
-			!slices.Equal(c.Groups(), bootstrap.Groups()) ||
-			!c.NotBefore().Equal(bootstrap.NotBefore()) || !c.NotAfter().Equal(bootstrap.NotAfter()) {
+			!slices.Equal(c.Groups(), bootstrap.Groups()) {
 			return nil, fmt.Errorf("capability %d identity does not match bootstrap", i)
 		}
 		if _, err := verifier(c); err != nil {

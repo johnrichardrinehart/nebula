@@ -41,6 +41,9 @@ type CertState struct {
 	v2Cert       cert.Certificate
 	v2Credential *handshake.Credential
 
+	upgradeCredentials map[cert.Curve]*handshake.Credential
+	curvePreferences   []cert.Curve
+
 	initiatingVersion cert.Version
 	privateKey        []byte
 	pkcs11Backed      bool
@@ -220,6 +223,14 @@ func (cs *CertState) GetDefaultCertificate() cert.Certificate {
 func (cs *CertState) DefaultVersion() cert.Version { return cs.initiatingVersion }
 
 // GetCredential returns the pre-computed handshake credential for the given version, or nil.
+func (cs *CertState) GetUpgradeCredential(curve cert.Curve) *handshake.Credential {
+	return cs.upgradeCredentials[curve]
+}
+
+func (cs *CertState) CurvePreferences() []cert.Curve {
+	return append([]cert.Curve(nil), cs.curvePreferences...)
+}
+
 func (cs *CertState) GetCredential(v cert.Version) *handshake.Credential {
 	switch v {
 	case cert.Version1:
@@ -391,11 +402,19 @@ func newCertStateFromConfig(c *config.C, cipher string) (*CertState, error) {
 		return nil, fmt.Errorf("unknown pki.initiating_version: %v", rawInitiatingVersion)
 	}
 
-	return newCertState(initiatingVersion, v1, v2, isPkcs11, curve, rawKey, cipher)
+	state, err := newCertState(initiatingVersion, v1, v2, isPkcs11, curve, rawKey, cipher)
+	if err != nil {
+		return nil, err
+	}
+	if err := state.loadUpgradeCredentials(c, cipher); err != nil {
+		return nil, err
+	}
+	return state, nil
 }
 
 func newCertState(dv cert.Version, v1, v2 cert.Certificate, pkcs11backed bool, privateKeyCurve cert.Curve, privateKey []byte, cipher string) (*CertState, error) {
 	cs := CertState{
+		upgradeCredentials:       make(map[cert.Curve]*handshake.Credential),
 		privateKey:               privateKey,
 		pkcs11Backed:             pkcs11backed,
 		cipher:                   cipher,
@@ -525,6 +544,99 @@ func newCertState(dv cert.Version, v1, v2 cert.Certificate, pkcs11backed bool, p
 	}
 
 	return &cs, nil
+}
+
+func (cs *CertState) loadUpgradeCredentials(c *config.C, cipher string) error {
+	bootstrap := cs.GetDefaultCertificate()
+	var capabilities []handshake.KeyCapability
+	configured := map[cert.Curve]struct{}{}
+	for _, curve := range []cert.Curve{cert.Curve_P384, cert.Curve_P256} {
+		name := strings.ToLower(curve.String())
+		certPath := c.GetString("pki."+name+"_cert", "")
+		keyPath := c.GetString("pki."+name+"_key", "")
+		if certPath == "" && keyPath == "" {
+			continue
+		}
+		if certPath == "" || keyPath == "" {
+			return fmt.Errorf("both pki.%s_cert and pki.%s_key are required", name, name)
+		}
+		certificatePEM, err := os.ReadFile(certPath)
+		if err != nil {
+			return fmt.Errorf("read %s upgrade certificate: %w", curve, err)
+		}
+		upgradeCert, rest, err := cert.UnmarshalCertificateFromPEM(certificatePEM)
+		if err != nil || len(strings.TrimSpace(string(rest))) != 0 {
+			return fmt.Errorf("parse %s upgrade certificate: %w", curve, err)
+		}
+		if upgradeCert.Curve() != curve || upgradeCert.Name() != bootstrap.Name() ||
+			!slices.Equal(upgradeCert.Networks(), bootstrap.Networks()) ||
+			!slices.Equal(upgradeCert.Groups(), bootstrap.Groups()) {
+			return fmt.Errorf("%s upgrade certificate does not match bootstrap identity", curve)
+		}
+		private, privateCurve, hardware, err := loadPrivateKey(keyPath)
+		if err != nil {
+			return err
+		}
+		if privateCurve != curve {
+			return fmt.Errorf("%s upgrade private key has curve %s", curve, privateCurve)
+		}
+		if strings.HasPrefix(string(private), "tpm2:") {
+			if err := verifyTPMPublicKey(private, upgradeCert); err != nil {
+				return err
+			}
+		} else if !hardware {
+			if err := upgradeCert.VerifyPrivateKey(curve, private); err != nil {
+				return err
+			}
+		}
+		encoded, err := upgradeCert.MarshalForHandshakes()
+		if err != nil {
+			return err
+		}
+		suite, err := newCipherSuite(curve, hardware, private, cipher)
+		if err != nil {
+			return err
+		}
+		cs.upgradeCredentials[curve] = handshake.NewCredential(upgradeCert, encoded, private, suite)
+		capabilities = append(capabilities, handshake.KeyCapability{Curve: uint32(curve), Certificate: append([]byte(nil), certificatePEM...)})
+		configured[curve] = struct{}{}
+	}
+	if len(capabilities) == 0 {
+		return nil
+	}
+	if cs.v2Credential == nil {
+		return errors.New("mixed-curve upgrades require a v2 X25519 bootstrap certificate")
+	}
+	preferences := c.GetStringSlice("pki.curve_preferences", nil)
+	if len(preferences) == 0 {
+		cs.curvePreferences = []cert.Curve{cert.Curve_P384, cert.Curve_P256}
+	} else {
+		for _, preference := range preferences {
+			var curve cert.Curve
+			switch strings.ToUpper(preference) {
+			case "P384":
+				curve = cert.Curve_P384
+			case "P256":
+				curve = cert.Curve_P256
+			default:
+				return fmt.Errorf("unknown pki.curve_preferences value %q", preference)
+			}
+			if _, ok := configured[curve]; !ok {
+				return fmt.Errorf("preferred curve %s has no configured credential", curve)
+			}
+			cs.curvePreferences = append(cs.curvePreferences, curve)
+		}
+	}
+	ordered := make([]handshake.KeyCapability, 0, len(cs.curvePreferences))
+	for _, preference := range cs.curvePreferences {
+		for _, capability := range capabilities {
+			if cert.Curve(capability.Curve) == preference {
+				ordered = append(ordered, capability)
+			}
+		}
+	}
+	cs.v2Credential.WithCapabilities(ordered)
+	return nil
 }
 
 func verifyTPMPublicKey(keyReference []byte, certificate cert.Certificate) error {

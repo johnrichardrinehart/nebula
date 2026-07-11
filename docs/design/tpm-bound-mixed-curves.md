@@ -50,8 +50,11 @@ repeated KeyCapability key_capabilities = 9; // preference order
 bytes capability_nonce = 10;                 // 32 random bytes
 ```
 
-Each certificate binds the same Nebula network identity, groups, validity
-window, and issuer policy to one public key. The existing X25519 certificate is
+Each certificate binds the same Nebula network identity and groups to one
+public key and is independently validated by the configured CA pool. Because
+legacy Nebula certificates conflate host and CA curves, deployments currently
+use one trusted CA root per curve with equivalent constraints; exact issuer
+fingerprints and validity timestamps need not match. The existing X25519 certificate is
 included conceptually as the bootstrap capability but need not be duplicated.
 Unknown fields remain ignored by stock Nebula's narrow parser.
 
@@ -134,6 +137,17 @@ Software, PKCS#11, and TPM implementations satisfy this interface. Public-key
 parsing and point validation happen before backend dispatch. The Noise adapter
 uses opaque handles internally; callers never receive a TPM private scalar.
 
+## Configuration
+
+Mixed-curve daemon operation keeps the stock v2 X25519 credential in
+`pki.cert`/`pki.key` and accepts optional `pki.p256_cert`, `pki.p256_key`,
+`pki.p384_cert`, and `pki.p384_key` pairs. `pki.curve_preferences` orders the
+configured upgrades, for example `[P384, P256]`. Every curve-specific CA must
+be present in `pki.ca`. Fork peers first establish the stock-compatible tunnel,
+then automatically negotiate and replace it with the selected explicit upgrade.
+Upgrade-over-relay is currently rejected rather than silently falling back;
+direct peer endpoints are required for mixed-curve upgrade.
+
 ## TPM behavior
 
 P-256 and P-384 keys are created beneath a configured storage parent with
@@ -154,10 +168,12 @@ systemd `ExecStartPre` helper unseals it and installs it in a service-owned
 kernel keyring. The main process reads it directly into locked memory and
 revokes the keyring entry after acquisition. No plaintext key file is created.
 DynamicUser, keyring permissions, `NoNewPrivileges`, ptrace restrictions,
-`LimitCORE=0`, `PR_SET_DUMPABLE=0`, and CRIU denial reduce exposure.
+`LimitCORE=0`, `PR_SET_DUMPABLE=0`, `PR_SET_PTRACER=0`, `MADV_DONTDUMP`, and
+CRIU denial through the non-dumpable/ptrace boundary reduce exposure.
 
-Without a TPM, an ephemeral host-bound wrapping key protects idle in-memory
-key material. The process decrypts into a locked scratch buffer only for the
+Without a TPM, fresh random wrapping material is mixed with Linux machine-id
+and boot-id to create an ephemeral host-bound wrapping key that protects idle
+in-memory key material. The process decrypts into a locked scratch buffer only for the
 software X25519 operation, then wipes it. Loss or change of wrapping material
 makes the stored value unrecoverable.
 

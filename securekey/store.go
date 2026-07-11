@@ -35,6 +35,10 @@ func Protect(plaintext []byte) ([]byte, error) {
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		return nil, err
 	}
+	if err := bindWrappingKey(key); err != nil {
+		wipe(key)
+		return nil, fmt.Errorf("bind wrapping key to host: %w", err)
+	}
 	if err := protectMemory(key); err != nil {
 		wipe(key)
 		return nil, fmt.Errorf("protect wrapping key memory: %w", err)

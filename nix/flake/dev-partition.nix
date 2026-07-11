@@ -22,6 +22,10 @@
           tpmclientTest = self'.packages.tpmclient-test;
           handshakeTest = self'.packages.handshake-test;
         };
+        mixed-daemon = import ../checks/mixed-daemon.nix {
+          inherit pkgs;
+          nebula = self'.packages.nebula;
+        };
         sealed-x25519 = import ../checks/sealed-x25519.nix {
           inherit pkgs;
           nebula = self'.packages.nebula;

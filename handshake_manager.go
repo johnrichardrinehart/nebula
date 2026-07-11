@@ -73,6 +73,10 @@ type HandshakeManager struct {
 
 	// can be used to trigger outbound handshake for the given vpnIp
 	trigger chan netip.Addr
+
+	upgradePlans    map[netip.Addr]handshake.UpgradePlan
+	upgradeRemotes  map[netip.AddrPort]handshake.UpgradePlan
+	capabilityCache *handshake.CapabilityCache
 }
 
 type HandshakeHostInfo struct {
@@ -86,8 +90,9 @@ type HandshakeHostInfo struct {
 	lastRelays                []netip.Addr     // Relays we attempted to use during the previous attempt
 	packetStore               []*cachedPacket  // A set of packets to be transmitted once the handshake completes
 
-	hostinfo *HostInfo
-	machine  *handshake.Machine // The handshake state machine, set during stage 0 (initiator) or beginHandshake (responder multi-message)
+	hostinfo    *HostInfo
+	machine     *handshake.Machine // The handshake state machine, set during stage 0 (initiator) or beginHandshake (responder multi-message)
+	upgradePlan *handshake.UpgradePlan
 }
 
 func (hh *HandshakeHostInfo) cachePacket(l *slog.Logger, t header.MessageType, st header.MessageSubType, packet []byte, f packetCallback, m *cachedPacketMetrics) {
@@ -126,6 +131,9 @@ func NewHandshakeManager(l *slog.Logger, mainHostMap *HostMap, lightHouse *Light
 		trigger:                make(chan netip.Addr, config.triggerBuffer),
 		OutboundHandshakeTimer: NewLockingTimerWheel[netip.Addr](config.tryInterval, hsTimeout(config.retries, config.tryInterval)),
 		messageMetrics:         config.messageMetrics,
+		upgradePlans:           make(map[netip.Addr]handshake.UpgradePlan),
+		upgradeRemotes:         make(map[netip.AddrPort]handshake.UpgradePlan),
+		capabilityCache:        handshake.NewCapabilityCache(),
 		metricInitiated:        metrics.GetOrRegisterCounter("handshake_manager.initiated", nil),
 		metricTimedOut:         metrics.GetOrRegisterCounter("handshake_manager.timed_out", nil),
 		l:                      l,
@@ -153,7 +161,7 @@ func (hm *HandshakeManager) HandleIncoming(via ViaSender, packet []byte, h *head
 	// don't yet support) are dropped here rather than silently routed through
 	// the IX path. Add a case when introducing a new pattern.
 	switch h.Subtype {
-	case header.HandshakeIXPSK0:
+	case header.HandshakeIXPSK0, header.HandshakeIXP256Upgrade, header.HandshakeIXP384Upgrade:
 		// supported
 	default:
 		hm.l.Debug("dropping handshake with unsupported subtype",
@@ -660,10 +668,30 @@ func (hm *HandshakeManager) buildStage0Packet(hh *HandshakeHostInfo) bool {
 		return false
 	}
 
-	machine, err := handshake.NewMachine(
-		v, cs.GetCredential,
+	getCredential := cs.GetCredential
+	subtype := header.HandshakeIXPSK0
+	var prologue []byte
+	if hh.upgradePlan != nil {
+		upgradeCredential := cs.GetUpgradeCredential(hh.upgradePlan.Curve)
+		if upgradeCredential == nil {
+			hm.f.l.Error("Negotiated upgrade credential is unavailable", "curve", hh.upgradePlan.Curve)
+			return false
+		}
+		getCredential = func(cert.Version) *handshake.Credential { return upgradeCredential }
+		prologue = hh.upgradePlan.Prologue[:]
+		switch hh.upgradePlan.Curve {
+		case cert.Curve_P256:
+			subtype = header.HandshakeIXP256Upgrade
+		case cert.Curve_P384:
+			subtype = header.HandshakeIXP384Upgrade
+		default:
+			return false
+		}
+	}
+	machine, err := handshake.NewMachineWithPrologue(
+		v, getCredential,
 		hm.certVerifier(), func() (uint32, error) { return hm.allocateIndex(hh) },
-		true, header.HandshakeIXPSK0,
+		true, subtype, prologue,
 	)
 	if err != nil {
 		hm.f.l.Error("Failed to create handshake machine",
@@ -701,10 +729,40 @@ func (hm *HandshakeManager) beginHandshake(via ViaSender, packet []byte, h *head
 		return
 	}
 
-	machine, err := handshake.NewMachine(
-		v, cs.GetCredential,
+	getCredential := cs.GetCredential
+	var prologue []byte
+	if h.Subtype != header.HandshakeIXPSK0 {
+		if via.IsRelayed {
+			f.l.Warn("Mixed-curve upgrade over relay is not supported", "from", via)
+			return
+		}
+		hm.RLock()
+		plan, ok := hm.upgradeRemotes[via.UdpAddr]
+		hm.RUnlock()
+		if !ok {
+			f.l.Warn("Rejecting upgrade without authenticated bootstrap", "from", via)
+			return
+		}
+		expectedSubtype := header.HandshakeIXP256Upgrade
+		if plan.Curve == cert.Curve_P384 {
+			expectedSubtype = header.HandshakeIXP384Upgrade
+		}
+		if h.Subtype != expectedSubtype {
+			f.l.Warn("Upgrade subtype does not match negotiated curve", "from", via)
+			return
+		}
+		upgradeCredential := cs.GetUpgradeCredential(plan.Curve)
+		if upgradeCredential == nil {
+			f.l.Error("Negotiated upgrade credential is unavailable", "curve", plan.Curve)
+			return
+		}
+		getCredential = func(cert.Version) *handshake.Credential { return upgradeCredential }
+		prologue = plan.Prologue[:]
+	}
+	machine, err := handshake.NewMachineWithPrologue(
+		v, getCredential,
 		hm.certVerifier(), func() (uint32, error) { return generateIndex(f.l) },
-		false, header.HandshakeIXPSK0,
+		false, h.Subtype, prologue,
 	)
 	if err != nil {
 		f.l.Error("Failed to create handshake machine", "from", via, "error", err)
@@ -732,6 +790,9 @@ func (hm *HandshakeManager) beginHandshake(via ViaSender, packet []byte, h *head
 	remoteCert := result.RemoteCert
 	if remoteCert == nil {
 		f.l.Error("Handshake did not produce a peer certificate", "from", via)
+		return
+	}
+	if machine.Subtype() == header.HandshakeIXPSK0 && !hm.observeCapabilities(result, via) {
 		return
 	}
 
@@ -792,6 +853,9 @@ func (hm *HandshakeManager) beginHandshake(via ViaSender, packet []byte, h *head
 		return
 	}
 
+	if machine.Subtype() == header.HandshakeIXPSK0 {
+		hm.recordUpgrade(result, vpnAddrs[0], via, false)
+	}
 	hm.sendHandshakeResponse(via, response, hostinfo, false)
 	hostinfo.remotes.RefreshFromHandshake(vpnAddrs)
 
@@ -866,6 +930,10 @@ func (hm *HandshakeManager) continueHandshake(via ViaSender, hh *HandshakeHostIn
 	if remoteCert == nil {
 		f.l.Error("Handshake completed without peer certificate",
 			"vpnAddrs", hostinfo.vpnAddrs, "from", via)
+		hm.DeleteHostInfo(hostinfo)
+		return
+	}
+	if machine.Subtype() == header.HandshakeIXPSK0 && !hm.observeCapabilities(result, via) {
 		hm.DeleteHostInfo(hostinfo)
 		return
 	}
@@ -973,12 +1041,66 @@ func (hm *HandshakeManager) continueHandshake(via ViaSender, hh *HandshakeHostIn
 	}
 
 	hostinfo.remotes.RefreshFromHandshake(vpnAddrs)
+	if machine.Subtype() == header.HandshakeIXPSK0 {
+		hm.recordUpgrade(result, vpnAddrs[0], via, true)
+	}
 	f.metricHandshakes.Update(duration)
 
 	// Don't wait for UpdateWorker
 	if f.lightHouse.IsAnyLighthouseAddr(vpnAddrs) {
 		f.lightHouse.TriggerUpdate()
 	}
+}
+
+func (hm *HandshakeManager) observeCapabilities(result *handshake.Result, via ViaSender) bool {
+	remote := result.RemoteCert
+	if remote == nil {
+		return false
+	}
+	err := hm.capabilityCache.Observe(
+		remote.Fingerprint,
+		remote.Certificate.NotAfter(),
+		len(result.RemoteCapabilities) > 0,
+		false,
+		time.Now(),
+	)
+	if err != nil {
+		hm.l.Warn("Rejecting authenticated X25519 downgrade", "from", via, "fingerprint", remote.Fingerprint, "error", err)
+		return false
+	}
+	return true
+}
+
+func (hm *HandshakeManager) recordUpgrade(result *handshake.Result, vpnAddr netip.Addr, via ViaSender, initiate bool) {
+	plan, err := handshake.PlanUpgrade(result)
+	if err != nil {
+		if !errors.Is(err, handshake.ErrNoMutuallySupportedCurve) {
+			hm.l.Warn("Mixed-curve negotiation did not produce an upgrade", "vpnAddr", vpnAddr, "error", err)
+		}
+		return
+	}
+	cs := hm.f.pki.getCertState()
+	if cs.GetUpgradeCredential(plan.Curve) == nil {
+		hm.l.Error("Peer selected an unavailable mixed-curve credential", "vpnAddr", vpnAddr, "curve", plan.Curve)
+		return
+	}
+	hm.Lock()
+	hm.upgradePlans[vpnAddr] = plan
+	if !via.IsRelayed {
+		hm.upgradeRemotes[via.UdpAddr] = plan
+	}
+	hm.Unlock()
+	hm.l.Info("Authenticated mixed-curve upgrade negotiated", "vpnAddr", vpnAddr, "curve", plan.Curve)
+	if !initiate {
+		return
+	}
+	existing := hm.mainHostMap.QueryVpnAddr(vpnAddr)
+	hm.StartHandshake(vpnAddr, func(hh *HandshakeHostInfo) {
+		hh.upgradePlan = &plan
+		if existing != nil {
+			hh.hostinfo.remotes = existing.remotes
+		}
+	})
 }
 
 // validatePeerCert checks the peer certificate for self-connection and remote allow list.
