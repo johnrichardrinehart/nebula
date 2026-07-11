@@ -7,6 +7,10 @@
       url = "github:hercules-ci/flake-parts";
       inputs.nixpkgs-lib.follows = "nixpkgs";
     };
+    nebula-upstream = {
+      url = "github:slackhq/nebula/86733864fe7f13ad5664250af1c1726fe8275ab3";
+      flake = false;
+    };
   };
 
   outputs =
@@ -70,6 +74,17 @@
                 license = lib.licenses.mit;
                 mainProgram = "nebula";
               };
+            };
+
+            nebula-upstream = pkgs.buildGoModule {
+              pname = "nebula-upstream";
+              version = "86733864";
+              src = inputs.nebula-upstream;
+              vendorHash = "sha256-RT3oE58+LevfJ+pZsu39XFKGuDfBRfdpx1ujWYVVOdU=";
+              subPackages = [
+                "cmd/nebula"
+                "cmd/nebula-cert"
+              ];
             };
 
             tpmclient-test = pkgs.buildGoModule {

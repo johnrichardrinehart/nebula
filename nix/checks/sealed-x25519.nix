@@ -1,4 +1,8 @@
-{ pkgs, nebula }:
+{
+  pkgs,
+  nebula,
+  nebulaUpstream,
+}:
 let
   unseal = pkgs.writeShellScript "nebula-unseal-x25519" ''
     set -euo pipefail
@@ -19,6 +23,7 @@ pkgs.testers.runNixOSTest {
 
   nodes.machine = { ... }: {
     virtualisation.tpm.enable = true;
+    networking.firewall.allowedUDPPorts = [ 4242 ];
     users.groups.tss = { };
     services.udev.extraRules = ''
       KERNEL=="tpm[0-9]*", GROUP="tss", MODE="0660"
@@ -33,6 +38,8 @@ pkgs.testers.runNixOSTest {
     systemd.services.nebula-sealed-test = {
       serviceConfig = {
         DynamicUser = true;
+        AmbientCapabilities = [ "CAP_NET_ADMIN" ];
+        CapabilityBoundingSet = [ "CAP_NET_ADMIN" ];
         KeyringMode = "private";
         RuntimeDirectory = "nebula-test";
         StateDirectory = "nebula-test";
@@ -48,9 +55,22 @@ pkgs.testers.runNixOSTest {
     };
   };
 
+  nodes.stock = { ... }: {
+    networking.firewall.allowedUDPPorts = [ 4242 ];
+    environment.systemPackages = [ nebulaUpstream ];
+    systemd.services.nebula-stock = {
+      serviceConfig = {
+        ExecStart = "${nebulaUpstream}/bin/nebula -config /var/lib/nebula-stock/config.yml";
+        Restart = "no";
+      };
+    };
+  };
+
   testScript = ''
     machine.start()
+    stock.start()
     machine.wait_for_unit("multi-user.target")
+    stock.wait_for_unit("multi-user.target")
     machine.succeed("install -d -m 0755 /var/lib/nebula-test")
 
     machine.succeed("tpm2_createprimary -C o -G rsa -g sha256 -c /var/lib/nebula-test/primary.ctx")
@@ -76,12 +96,28 @@ pkgs.testers.runNixOSTest {
       "-name host -ip 10.42.42.1/24 -in-pub /var/lib/nebula-test/host.pub "
       "-out-crt /var/lib/nebula-test/host.crt"
     )
+    machine.succeed("nebula-cert keygen -out-key /tmp/stock.key -out-pub /tmp/stock.pub")
+    machine.succeed(
+      "nebula-cert sign -ca-crt /var/lib/nebula-test/ca.crt -ca-key /var/lib/nebula-test/ca.key "
+      "-name stock -ip 10.42.42.2/24 -in-pub /tmp/stock.pub -out-crt /tmp/stock.crt"
+    )
     machine.succeed("rm /var/lib/nebula-test/ca.key")
     machine.succeed("test ! -e /var/lib/nebula-test/host.key")
     machine.succeed("! grep -R 'NEBULA X25519 PRIVATE KEY' /var/lib/nebula-test")
 
-    machine.succeed("cat > /var/lib/nebula-test/config.yml <<'EOF'\npki:\n  ca: /var/lib/nebula-test/ca.crt\n  cert: /var/lib/nebula-test/host.crt\n  key: keyring:nebula-host-key\nlisten:\n  host: 127.0.0.1\n  port: 4242\ntun:\n  disabled: true\nfirewall:\n  inbound:\n    - port: any\n      proto: any\n      host: any\n  outbound:\n    - port: any\n      proto: any\n      host: any\nEOF")
+    machine.succeed("cat > /var/lib/nebula-test/config.yml <<'EOF'\npki:\n  ca: /var/lib/nebula-test/ca.crt\n  cert: /var/lib/nebula-test/host.crt\n  key: keyring:nebula-host-key\nstatic_host_map:\n  '10.42.42.2': ['192.168.1.2:4242']\nlisten:\n  host: 0.0.0.0\n  port: 4242\nfirewall:\n  inbound:\n    - port: any\n      proto: any\n      host: any\n  outbound:\n    - port: any\n      proto: any\n      host: any\nEOF")
     machine.succeed("chmod -R a+rX /var/lib/nebula-test")
+
+    stock.succeed("install -d -m 0755 /var/lib/nebula-stock")
+    for source, destination in [
+      ("/var/lib/nebula-test/ca.crt", "/var/lib/nebula-stock/ca.crt"),
+      ("/tmp/stock.crt", "/var/lib/nebula-stock/host.crt"),
+      ("/tmp/stock.key", "/var/lib/nebula-stock/host.key"),
+    ]:
+      encoded = machine.succeed(f"base64 -w0 {source}").strip()
+      stock.succeed(f"printf %s {encoded} | base64 -d > {destination}")
+    stock.succeed("cat > /var/lib/nebula-stock/config.yml <<'EOF'\npki:\n  ca: /var/lib/nebula-stock/ca.crt\n  cert: /var/lib/nebula-stock/host.crt\n  key: /var/lib/nebula-stock/host.key\nstatic_host_map:\n  '10.42.42.1': ['192.168.1.1:4242']\nlisten:\n  host: 0.0.0.0\n  port: 4242\nfirewall:\n  inbound:\n    - port: any\n      proto: any\n      host: any\n  outbound:\n    - port: any\n      proto: any\n      host: any\nEOF")
+    stock.succeed("systemctl start nebula-stock.service")
 
     machine.succeed("systemctl start nebula-sealed-test.service")
     machine.wait_for_unit("nebula-sealed-test.service")
@@ -92,6 +128,9 @@ pkgs.testers.runNixOSTest {
     # immediately after loading even within the inherited service keyring.
     machine.succeed("! keyctl search @s user nebula-host-key")
     machine.succeed("test ! -e /run/nebula-test/host.key")
+    machine.wait_until_succeeds("ping -c1 -W1 10.42.42.2", timeout=60)
+    stock.wait_until_succeeds("ping -c1 -W1 10.42.42.1", timeout=60)
+    stock.succeed("systemctl is-active nebula-stock.service")
 
     machine.succeed("systemctl stop nebula-sealed-test.service")
     machine.succeed("digest=$(printf changed | sha256sum | cut -d' ' -f1); tpm2_pcrextend 7:sha256=$digest")

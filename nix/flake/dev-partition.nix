@@ -24,6 +24,7 @@
         sealed-x25519 = import ../checks/sealed-x25519.nix {
           inherit pkgs;
           nebula = self'.packages.nebula;
+          nebulaUpstream = self'.packages.nebula-upstream;
         };
       };
 

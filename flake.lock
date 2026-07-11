@@ -20,6 +20,23 @@
         "type": "github"
       }
     },
+    "nebula-upstream": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1783702937,
+        "narHash": "sha256-l46e9Ou6WArE4JMYDCfkTZd8V3y9bRQuqEjLQB26X/s=",
+        "owner": "slackhq",
+        "repo": "nebula",
+        "rev": "86733864fe7f13ad5664250af1c1726fe8275ab3",
+        "type": "github"
+      },
+      "original": {
+        "owner": "slackhq",
+        "repo": "nebula",
+        "rev": "86733864fe7f13ad5664250af1c1726fe8275ab3",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1783522502,
@@ -39,6 +56,7 @@
     "root": {
       "inputs": {
         "flake-parts": "flake-parts",
+        "nebula-upstream": "nebula-upstream",
         "nixpkgs": "nixpkgs"
       }
     }
