@@ -56,6 +56,7 @@
               subPackages = [
                 "cmd/nebula"
                 "cmd/nebula-cert"
+                "cmd/nebula-keyring"
                 "cmd/nebula-service"
               ];
 

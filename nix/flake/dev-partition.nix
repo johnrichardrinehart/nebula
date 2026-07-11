@@ -21,6 +21,10 @@
           inherit pkgs;
           tpmclientTest = self'.packages.tpmclient-test;
         };
+        sealed-x25519 = import ../checks/sealed-x25519.nix {
+          inherit pkgs;
+          nebula = self'.packages.nebula;
+        };
       };
 
       devShells.default = pkgs.mkShell {

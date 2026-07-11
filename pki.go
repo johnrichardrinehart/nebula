@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -20,7 +21,9 @@ import (
 	"github.com/slackhq/nebula/cert"
 	"github.com/slackhq/nebula/config"
 	"github.com/slackhq/nebula/handshake"
+	"github.com/slackhq/nebula/keyring"
 	"github.com/slackhq/nebula/noiseutil"
+	"github.com/slackhq/nebula/securekey"
 	"github.com/slackhq/nebula/tpmclient"
 	"github.com/slackhq/nebula/util"
 )
@@ -242,7 +245,11 @@ func newCipherSuite(curve cert.Curve, hardwareBacked bool, privateKey []byte, ci
 	var dhFunc noise.DHFunc
 	switch curve {
 	case cert.Curve_CURVE25519:
-		dhFunc = noise.DH25519
+		if securekey.IsReference(privateKey) {
+			dhFunc = noiseutil.DH25519SecureKey
+		} else {
+			dhFunc = noise.DH25519
+		}
 	case cert.Curve_P256:
 		switch {
 		case strings.HasPrefix(string(privateKey), "pkcs11:"):
@@ -261,7 +268,7 @@ func newCipherSuite(curve cert.Curve, hardwareBacked bool, privateKey []byte, ci
 	default:
 		return nil, fmt.Errorf("unsupported curve: %s", curve)
 	}
-	if hardwareBacked && !strings.HasPrefix(string(privateKey), "pkcs11:") && !strings.HasPrefix(string(privateKey), "tpm2:") {
+	if hardwareBacked && !securekey.IsReference(privateKey) && !strings.HasPrefix(string(privateKey), "pkcs11:") && !strings.HasPrefix(string(privateKey), "tpm2:") {
 		return nil, errors.New("hardware-backed key has unsupported reference")
 	}
 
@@ -397,6 +404,30 @@ func newCertState(dv cert.Version, v1, v2 cert.Certificate, pkcs11backed bool, p
 		myVpnBroadcastAddrsTable: new(bart.Lite),
 	}
 
+	if privateKeyCurve == cert.Curve_CURVE25519 && len(privateKey) > 0 && !pkcs11backed && securekey.Supported() {
+		if v1 != nil {
+			if err := v1.VerifyPrivateKey(privateKeyCurve, privateKey); err != nil {
+				return nil, fmt.Errorf("private key is not a pair with public key in nebula cert")
+			}
+		}
+		if v2 != nil {
+			if err := v2.VerifyPrivateKey(privateKeyCurve, privateKey); err != nil {
+				return nil, fmt.Errorf("private key is not a pair with public key in nebula cert")
+			}
+		}
+		protected, err := securekey.Protect(privateKey)
+		if err != nil {
+			return nil, fmt.Errorf("protect software private key: %w", err)
+		}
+		privateKey = protected
+		cs.privateKey = protected
+		pkcs11backed = true
+		cs.pkcs11Backed = true
+		runtime.SetFinalizer(&cs, func(state *CertState) {
+			_ = securekey.Destroy(state.privateKey)
+		})
+	}
+
 	if v1 != nil && v2 != nil {
 		if !slices.Equal(v1.PublicKey(), v2.PublicKey()) {
 			return nil, util.NewContextualError("v1 and v2 public keys are not the same, ignoring", nil, nil)
@@ -519,6 +550,19 @@ func loadPrivateKey(privPathOrPEM string) (rawKey []byte, curve cert.Curve, isPk
 		rawKey, _, curve, err = cert.UnmarshalPrivateKeyFromPEM(pemPrivateKey)
 		if err != nil {
 			return nil, curve, false, fmt.Errorf("error while unmarshaling pki.key %s: %s", privPathOrPEM, err)
+		}
+	} else if strings.HasPrefix(privPathOrPEM, "keyring:") {
+		description := strings.TrimPrefix(privPathOrPEM, "keyring:")
+		pemPrivateKey, err = keyring.Consume(description)
+		if err != nil {
+			return nil, curve, false, err
+		}
+		rawKey, _, curve, err = cert.UnmarshalPrivateKeyFromPEM(pemPrivateKey)
+		for i := range pemPrivateKey {
+			pemPrivateKey[i] = 0
+		}
+		if err != nil {
+			return nil, curve, false, fmt.Errorf("error while unmarshaling pki.key from kernel keyring: %s", err)
 		}
 	} else if strings.HasPrefix(privPathOrPEM, "pkcs11:") {
 		rawKey = []byte(privPathOrPEM)
