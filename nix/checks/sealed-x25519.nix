@@ -68,6 +68,8 @@ pkgs.testers.runNixOSTest {
     environment.systemPackages = [
       nebula
       pkgs.keyutils
+      pkgs.strace
+      pkgs.criu
     ];
     systemd.services.nebula-fallback = {
       serviceConfig = {
@@ -186,6 +188,9 @@ pkgs.testers.runNixOSTest {
     fallback.wait_until_succeeds("ping -c1 -W1 10.42.42.1", timeout=60)
     fallback.succeed("test ! -e /var/lib/nebula-fallback/host.key")
     fallback.succeed("pid=$(pgrep -x nebula); grep -q '^VmLck:[[:space:]]*[1-9]' /proc/$pid/status; grep -q '^CoreDumping:[[:space:]]*0' /proc/$pid/status")
+    fallback.succeed("! keyctl search @s user nebula-fallback-key")
+    fallback.succeed("pid=$(pgrep -x nebula); ! setpriv --reuid=nobody --regid=nogroup --clear-groups strace -p $pid -o /tmp/trace")
+    fallback.succeed("pid=$(pgrep -x nebula); ! setpriv --reuid=nobody --regid=nogroup --clear-groups criu dump -t $pid -D /tmp -o criu.log")
     stock.succeed("securekey.test -test.v")
 
     machine.succeed("systemctl restart nebula-sealed-test.service")
